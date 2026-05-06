@@ -1,0 +1,48 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${SHORT_SHA}",
+        ".",
+      ]
+    dir: cloud_api
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${SHORT_SHA}",
+      ]
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "deploy",
+        "weather-ingestion-api",
+        "--image",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${SHORT_SHA}",
+        "--region",
+        "${_REGION}",
+        "--platform",
+        "managed",
+        "--allow-unauthenticated",
+        "--set-env-vars",
+        "PROJECT_ID=${PROJECT_ID},REGION=${_REGION},DATASET_ID=${_DATASET_ID},INDOOR_TABLE=${_INDOOR_TABLE},OUTDOOR_TABLE=${_OUTDOOR_TABLE},EVENTS_TABLE=${_EVENTS_TABLE},LATEST_TABLE=${_LATEST_TABLE},INGESTION_SHARED_SECRET=${_INGESTION_SHARED_SECRET},OPENWEATHER_API_KEY=${_OPENWEATHER_API_KEY},OPENWEATHER_LAT=${_OPENWEATHER_LAT},OPENWEATHER_LON=${_OPENWEATHER_LON}",
+      ]
+
+substitutions:
+  _REGION: europe-west6
+  _REPO: weather-repo
+  _DATASET_ID: weather_analytics
+  _INDOOR_TABLE: indoor_metrics
+  _OUTDOOR_TABLE: outdoor_weather
+  _EVENTS_TABLE: device_events
+  _LATEST_TABLE: latest_state
+  _INGESTION_SHARED_SECRET: replace-me
+  _OPENWEATHER_API_KEY: replace-me
+  _OPENWEATHER_LAT: "46.5197"
+  _OPENWEATHER_LON: "6.6323"

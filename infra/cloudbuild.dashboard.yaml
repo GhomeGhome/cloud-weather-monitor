@@ -1,0 +1,43 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${SHORT_SHA}",
+        ".",
+      ]
+    dir: dashboard
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${SHORT_SHA}",
+      ]
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "deploy",
+        "weather-dashboard",
+        "--image",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${SHORT_SHA}",
+        "--region",
+        "${_REGION}",
+        "--platform",
+        "managed",
+        "--allow-unauthenticated",
+        "--set-env-vars",
+        "PROJECT_ID=${PROJECT_ID},DATASET_ID=${_DATASET_ID},INDOOR_TABLE=${_INDOOR_TABLE},OUTDOOR_TABLE=${_OUTDOOR_TABLE},EVENTS_TABLE=${_EVENTS_TABLE}",
+      ]
+
+substitutions:
+  _REGION: europe-west6
+  _REPO: weather-repo
+  _DATASET_ID: weather_analytics
+  _INDOOR_TABLE: indoor_metrics
+  _OUTDOOR_TABLE: outdoor_weather
+  _EVENTS_TABLE: device_events
