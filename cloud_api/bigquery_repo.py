@@ -64,22 +64,36 @@ class BigQueryRepository:
         query = f"""
         MERGE `{self._table(settings.latest_table)}` T
         USING (
-          WITH latest_indoor AS (
-            SELECT AS VALUE STRUCT(event_ts, temperature_c, humidity_pct, tvoc_ppb, eco2_ppm, motion_detected)
-            FROM `{self._table(settings.indoor_table)}`
-            WHERE device_id = @device_id
-            ORDER BY event_ts DESC LIMIT 1
-          ),
-          latest_outdoor AS (
-            SELECT AS VALUE STRUCT(weather_ts, temperature_c, humidity_pct, weather_main, weather_description, weather_icon)
-            FROM `{self._table(settings.outdoor_table)}`
-            ORDER BY weather_ts DESC LIMIT 1
-          )
           SELECT
             @device_id AS device_id,
             CURRENT_TIMESTAMP() AS updated_at,
-            TO_JSON_STRING((SELECT * FROM latest_indoor)) AS indoor_json,
-            TO_JSON_STRING((SELECT * FROM latest_outdoor)) AS outdoor_json,
+            (
+              SELECT TO_JSON_STRING(STRUCT(
+                event_ts,
+                temperature_c,
+                humidity_pct,
+                tvoc_ppb,
+                eco2_ppm,
+                motion_detected
+              ))
+              FROM `{self._table(settings.indoor_table)}`
+              WHERE device_id = @device_id
+              ORDER BY event_ts DESC
+              LIMIT 1
+            ) AS indoor_json,
+            (
+              SELECT TO_JSON_STRING(STRUCT(
+                weather_ts,
+                temperature_c,
+                humidity_pct,
+                weather_main,
+                weather_description,
+                weather_icon
+              ))
+              FROM `{self._table(settings.outdoor_table)}`
+              ORDER BY weather_ts DESC
+              LIMIT 1
+            ) AS outdoor_json,
             TO_JSON_STRING(STRUCT('ok' AS status)) AS status_json
         ) S
         ON T.device_id = S.device_id

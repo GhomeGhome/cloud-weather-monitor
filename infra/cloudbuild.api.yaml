@@ -4,7 +4,7 @@ steps:
       [
         "build",
         "-t",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${SHORT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${_TAG}",
         ".",
       ]
     dir: cloud_api
@@ -13,7 +13,7 @@ steps:
     args:
       [
         "push",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${SHORT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${_TAG}",
       ]
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -24,17 +24,20 @@ steps:
         "deploy",
         "weather-ingestion-api",
         "--image",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${SHORT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-ingestion-api:${_TAG}",
         "--region",
         "${_REGION}",
         "--platform",
         "managed",
         "--allow-unauthenticated",
+        "--ingress",
+        "all",
         "--set-env-vars",
         "PROJECT_ID=${PROJECT_ID},REGION=${_REGION},DATASET_ID=${_DATASET_ID},INDOOR_TABLE=${_INDOOR_TABLE},OUTDOOR_TABLE=${_OUTDOOR_TABLE},EVENTS_TABLE=${_EVENTS_TABLE},LATEST_TABLE=${_LATEST_TABLE},INGESTION_SHARED_SECRET=${_INGESTION_SHARED_SECRET},OPENWEATHER_API_KEY=${_OPENWEATHER_API_KEY},OPENWEATHER_LAT=${_OPENWEATHER_LAT},OPENWEATHER_LON=${_OPENWEATHER_LON}",
       ]
 
 substitutions:
+  _TAG: latest
   _REGION: europe-west6
   _REPO: weather-repo
   _DATASET_ID: weather_analytics

@@ -32,6 +32,6 @@
 - Events page displays alert/event rows.
 
 ## Cloud Run checks
-- `/healthz` returns `status: ok`.
+- `/live` returns `status: ok`.
 - Dashboard URL is reachable publicly.
 - Service env vars are set (project, dataset, table names, secret, weather key).

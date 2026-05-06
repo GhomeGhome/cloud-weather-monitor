@@ -4,7 +4,7 @@ steps:
       [
         "build",
         "-t",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${SHORT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${_TAG}",
         ".",
       ]
     dir: dashboard
@@ -13,7 +13,7 @@ steps:
     args:
       [
         "push",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${SHORT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${_TAG}",
       ]
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -24,17 +24,20 @@ steps:
         "deploy",
         "weather-dashboard",
         "--image",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${SHORT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/weather-dashboard:${_TAG}",
         "--region",
         "${_REGION}",
         "--platform",
         "managed",
         "--allow-unauthenticated",
+        "--ingress",
+        "all",
         "--set-env-vars",
         "PROJECT_ID=${PROJECT_ID},DATASET_ID=${_DATASET_ID},INDOOR_TABLE=${_INDOOR_TABLE},OUTDOOR_TABLE=${_OUTDOOR_TABLE},EVENTS_TABLE=${_EVENTS_TABLE}",
       ]
 
 substitutions:
+  _TAG: latest
   _REGION: europe-west6
   _REPO: weather-repo
   _DATASET_ID: weather_analytics

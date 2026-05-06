@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 
@@ -8,14 +9,33 @@ from config import settings
 from models import AlertState, IngestRequest, IngestResponse
 from weather_client import fetch_current_weather
 
-
 app = FastAPI(title="Weather Ingestion API", version="0.1.0")
-repo = BigQueryRepository()
+
+_repo: Optional[BigQueryRepository] = None
 
 
-@app.get("/healthz")
-def healthz() -> dict:
+def get_repo() -> BigQueryRepository:
+    global _repo
+    if _repo is None:
+        _repo = BigQueryRepository()
+    return _repo
+
+
+@app.get("/")
+def root() -> dict:
+    return {"service": "weather-ingestion-api", "status": "alive"}
+
+
+@app.get("/live")
+def live() -> dict:
+    """Liveness check. Avoid path `/healthz` on Cloud Run (can be intercepted at Google edge)."""
     return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+
+
+# Backwards compatibility for local docs; may not work on some Cloud Run public URLs.
+@app.get("/health")
+def health_alias() -> dict:
+    return live()
 
 
 @app.post("/v1/ingest", response_model=IngestResponse)
@@ -25,6 +45,7 @@ def ingest(payload: IngestRequest) -> IngestResponse:
     if payload.secret != settings.ingestion_secret:
         raise HTTPException(status_code=401, detail="Invalid secret")
 
+    repo = get_repo()
     try:
         alert_flags = repo.insert_indoor_reading(payload)
         if alert_flags["low_humidity"]:
@@ -67,6 +88,7 @@ def ingest(payload: IngestRequest) -> IngestResponse:
 
 @app.get("/v1/device/{device_id}/latest")
 def latest_device_state(device_id: str) -> dict:
+    repo = get_repo()
     try:
         snapshot = repo.get_latest_snapshot(device_id)
         return {
@@ -81,6 +103,7 @@ def latest_device_state(device_id: str) -> dict:
 
 @app.get("/v1/weather/current")
 def current_weather(refresh: bool = False) -> dict:
+    repo = get_repo()
     try:
         if refresh:
             weather = fetch_current_weather()

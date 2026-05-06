@@ -1,6 +1,7 @@
--- Create dataset manually in BigQuery UI or with bq CLI before running table DDLs.
+-- Dataset: create `weather_analytics` in project weather-monitor-495511 before running (or use an existing one).
+-- Replace project/dataset if your teammate uses a different GCP project.
 
-CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.indoor_metrics` (
+CREATE TABLE IF NOT EXISTS `weather-monitor-495511.weather_analytics.indoor_metrics` (
   event_ts TIMESTAMP NOT NULL,
   device_id STRING NOT NULL,
   temperature_c FLOAT64,
@@ -16,7 +17,7 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.indoor_metrics` (
 PARTITION BY DATE(event_ts)
 CLUSTER BY device_id;
 
-CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.outdoor_weather` (
+CREATE TABLE IF NOT EXISTS `weather-monitor-495511.weather_analytics.outdoor_weather` (
   weather_ts TIMESTAMP NOT NULL,
   source STRING NOT NULL,
   lat FLOAT64,
@@ -34,7 +35,7 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.outdoor_weather` (
 PARTITION BY DATE(weather_ts)
 CLUSTER BY source;
 
-CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.device_events` (
+CREATE TABLE IF NOT EXISTS `weather-monitor-495511.weather_analytics.device_events` (
   event_ts TIMESTAMP NOT NULL,
   device_id STRING NOT NULL,
   event_type STRING NOT NULL,
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.device_events` (
 PARTITION BY DATE(event_ts)
 CLUSTER BY device_id, event_type;
 
-CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET_ID}.latest_state` (
+CREATE TABLE IF NOT EXISTS `weather-monitor-495511.weather_analytics.latest_state` (
   device_id STRING NOT NULL,
   updated_at TIMESTAMP NOT NULL,
   indoor_json STRING,

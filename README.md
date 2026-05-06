@@ -1,105 +1,192 @@
-# Cloud Analytics Weather Monitor
+# Cloud Analytics — Weather Monitor
 
-Indoor/outdoor weather monitoring platform using M5Stack Core2, Google Cloud, BigQuery, and Streamlit.
+Station météo intérieure / extérieure : **M5Stack Core2**, **Google Cloud** (BigQuery, Cloud Run), **Streamlit**, météo **OpenWeatherMap**.
 
-## Repository structure
-- `device/`: device runtime (sensor read loop, local UI hooks, boot sync, voice announcement cooldown)
-- `cloud_api/`: ingestion and read API for cloud persistence and recovery
-- `dashboard/`: Streamlit dashboard for realtime and historical views
-- `infra/`: BigQuery schema/queries and Cloud Build + Cloud Run deployment assets
-- `docs/`: conventions, test plan, video checklist, and Q&A prep
-- `tests/`: basic automated tests for critical logic
+---
 
-## Core features delivered
-- Indoor sensor ingestion (temperature, humidity, TVOC, eCO2, motion)
-- Outdoor weather integration via OpenWeatherMap
-- BigQuery storage for indoor history, outdoor weather, and events/alerts
-- Device boot sync from cloud latest state
-- Alert logic:
-  - low humidity when `< 40%`
-  - poor air quality when `eCO2 > 1000` or `TVOC > 500`
-- Streamlit dashboard with:
-  - realtime metrics
-  - historical charts
-  - recent events/alerts
-- Cloud deployment pipeline aligned with class labs:
-  - Docker
-  - Cloud Build
-  - Artifact Registry
-  - Cloud Run
+## Aperçu architecture
 
-## Hardware used
-- M5Stack Core2 x2
-- PIR Motion Unit x2
-- ENV III Unit x2
-- TVOC/eCO2 Gas Unit x1
+```
+M5Stack (capteurs) ──POST /v1/ingest──► API Cloud Run ──► BigQuery
+                                            ▲
+Streamlit Cloud Run ────SELECT──────────────┘
+```
 
-## Environment setup
-1. Copy and fill variables:
-   ```bash
-   cp .env.example .env
-   ```
-2. Export variables for local runs (`PROJECT_ID`, `DATASET_ID`, `INGESTION_SHARED_SECRET`, etc.).
-3. Ensure GCP credentials are available (`GOOGLE_APPLICATION_CREDENTIALS`).
+- **API** : ingestion des mesures, météo, lecture du dernier état (boot device).
+- **Dashboard** : uniquement lecture BigQuery (temps réel + historique + événements).
+- **Secrets** : jamais dans Git — utiliser `.env` (local) et variables d’environnement Cloud Run.
 
-## BigQuery initialization
-- Review and apply DDL from `infra/bigquery/schema.sql`.
-- Reference queries in `infra/bigquery/queries.sql`.
+---
 
-## Local run
+## Déploiements (à compléter après chaque mise en prod)
+
+Remplace par **tes** URLs une fois les services déployés :
+
+| Service | Usage | URL (exemple) |
+|--------|--------|----------------|
+| API ingestion | `GET /live`, `POST /v1/ingest`, `GET /v1/device/{id}/latest` | `https://weather-ingestion-api-… .a.run.app` |
+| Dashboard Streamlit | Interface publique pour le cours | `https://weather-dashboard-… .a.run.app` |
+
+**Santé de l’API sur Cloud Run** : utiliser **`GET /live`** (ou **`GET /`**). Le chemin **`/healthz`** peut être intercepté par l’infrastructure avant ton application.
+
+**Accès public** : après le premier déploiement, si `curl` renvoie **403**, ajouter le rôle **Cloud Run Invoker** pour **`allUsers`** sur chaque service concerné (Console GCP → Cloud Run → service → Permissions / IAM).
+
+---
+
+## Structure du dépôt
+
+| Dossier | Rôle |
+|---------|------|
+| `cloud_api/` | API FastAPI (ingestion BigQuery, endpoints device / météo) |
+| `dashboard/` | Application Streamlit |
+| `device/` | Logique « device » (simulation locale ; à brancher sur UIFlow / Core2) |
+| `infra/` | SQL BigQuery, `cloudbuild.*.yaml`, scripts `deploy_*.sh`, `setup_gcp.sh` |
+| `docs/` | Conventions, plan de tests, checklist vidéo, préparation Q&A |
+| `tests/` | Tests unitaires ciblés |
+---
+
+## Prérequis
+
+- **Python 3.11+**
+- **Compte Google Cloud** : projet avec facturation, APIs (BigQuery, Cloud Run, Artifact Registry, Cloud Build)
+- **Google Cloud SDK** (`gcloud`) installé et authentifié
+- Clé **OpenWeatherMap**
+- Compte de service GCP + JSON pour le développement local (`GOOGLE_APPLICATION_CREDENTIALS`) — **ne pas commiter le JSON**
+
+---
+
+## Matériel
+
+- M5Stack **Core2** ×2  
+- **ENV III** ×2  
+- **PIR Motion** ×2  
+- **TVOC/eCO2** ×1  
+
+---
+
+## Configuration locale
+
+```bash
+cp .env.example .env
+# Éditer .env : PROJECT_ID, DATASET_ID, INGESTION_SHARED_SECRET, OPENWEATHER_*, chemins credentials, etc.
+```
+
+Charger le `.env` avant les commandes locales :
+
+```bash
+set -a && source .env && set +a
+```
+
+---
+
+## BigQuery
+
+1. Créer le dataset (ex. `weather_analytics`) dans la console.  
+2. Exécuter le DDL : `infra/bigquery/schema.sql` (adapter project/dataset si besoin).  
+3. Requêtes d’exemple / reporting : `infra/bigquery/queries.sql`.
+
+---
+
+## Exécution locale
 
 ### API
+
 ```bash
 cd cloud_api
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cd .. && set -a && source .env && set +a && cd cloud_api
 uvicorn app:app --reload --port 8080
 ```
 
+Swagger : http://127.0.0.1:8080/docs  
+
 ### Dashboard
+
 ```bash
 cd dashboard
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cd .. && set -a && source .env && set +a && cd dashboard
 streamlit run app.py
 ```
 
-### Device simulation
+### Simulation device (sans Core2)
+
 ```bash
 cd device
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+# Configurer API_BASE_URL et INGESTION_SHARED_SECRET dans l’environnement
 python main.py
 ```
 
-## Cloud deployment
-1. Setup services and Artifact Registry:
-   ```bash
-   bash infra/deploy/setup_gcp.sh
-   ```
-2. Deploy API:
-   ```bash
-   bash infra/deploy/deploy_api.sh
-   ```
-3. Deploy dashboard:
-   ```bash
-   bash infra/deploy/deploy_dashboard.sh
-   ```
+---
 
-## Validation
-- Run syntax checks:
-  ```bash
-  python3 -m compileall cloud_api dashboard device tests
-  ```
-- Run tests:
-  ```bash
-  pytest -q
-  ```
-- Follow scenario checklist in `docs/test-plan.md`.
+## Déploiement cloud (résumé)
 
-## Deliverables support
-- Video checklist: `docs/video-checklist.md`
-- Presentation Q&A prep: `docs/presentation-qa.md`
+Depuis la **racine** du dépôt, avec `.env` chargé (secrets ingestion + OpenWeather pour l’API) :
 
-## Team contributions
-Add member names and ownership areas here before final submission.
+```bash
+PROJECT_ID=ton-project-id bash infra/deploy/setup_gcp.sh   # une première fois (repo Artifact Registry, APIs)
+set -a && source .env && set +a
+export PROJECT_ID=ton-project-id
+bash infra/deploy/deploy_api.sh
+bash infra/deploy/deploy_dashboard.sh
+```
+
+Puis **IAM Invoker** pour accès public si nécessaire (voir tableaux ci-dessus).  
+`SKIP_VERIFY=1` évite les vérifications HTTP post-build si besoin (`deploy_api.sh` / `deploy_dashboard.sh`).
+
+---
+
+## Test d’ingestion sans matériel
+
+Exemple (secret lu depuis `.env`, URL lue depuis `gcloud`) :
+
+```bash
+cd /chemin/vers/group_project
+set -a && source .env && set +a
+export API_URL="$(gcloud run services describe weather-ingestion-api --region=europe-west6 --project=$PROJECT_ID --format='value(status.url)' | tr -d '\r\n')"
+python3 -c "
+import json, os, datetime
+print(json.dumps({
+  'secret': os.environ['INGESTION_SHARED_SECRET'],
+  'device_id': 'core2-main',
+  'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+  'indoor': {'temperature_c': 22.5, 'humidity_pct': 45.0, 'tvoc_ppb': 100, 'eco2_ppm': 600},
+  'motion': {'detected': False, 'pir_sensor_id': 'pir-a'},
+  'meta': {'firmware_version': '0.1.0', 'wifi_ssid': 'iot-unil'},
+}))
+" | curl -sS -X POST "${API_URL}/v1/ingest" -H "Content-Type: application/json" -d @-
+```
+
+---
+
+## Qualité / tests
+
+```bash
+python3 -m compileall cloud_api dashboard device tests
+pip install -r requirements-dev.txt   # si besoin
+pytest -q
+```
+
+Scénarios manuels : **`docs/test-plan.md`**.
+
+---
+
+## Livrables cours
+
+- **Vidéo** (YouTube non listée) : voir `docs/video-checklist.md`  
+- **Soutenance** : `docs/presentation-qa.md`  
+- Ne pas inclure **mots de passe, clés API, JSON de compte de service** dans le dépôt.
+
+---
+
+## Équipe
+
+| Nom | Rôle / périmètre (à compléter) |
+|-----|--------------------------------|
+| … | … |
+
+*À mettre à jour avant remise : noms, responsabilités, lien vers la vidéo dans ce README.*
