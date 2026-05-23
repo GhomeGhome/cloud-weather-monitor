@@ -6,8 +6,19 @@ from fastapi import FastAPI, HTTPException
 
 from bigquery_repo import BigQueryRepository
 from config import settings
-from models import AlertState, IngestRequest, IngestResponse
-from weather_client import fetch_current_weather
+from models import (
+    AlertState,
+    IngestRequest,
+    IngestResponse,
+    QaRequest,
+    QaResponse,
+    SpeechToTextRequest,
+    SpeechToTextResponse,
+    TextToSpeechRequest,
+    TextToSpeechResponse,
+)
+from voice_qa_service import VoiceQaService
+from weather_client import fetch_current_weather, fetch_weather_forecast
 
 app = FastAPI(title="Weather Ingestion API", version="0.1.0")
 
@@ -109,5 +120,57 @@ def current_weather(refresh: bool = False) -> dict:
             weather = fetch_current_weather()
             repo.insert_outdoor_weather(weather)
         return {"status": "success", "weather": repo.get_latest_outdoor()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/v1/weather/forecast")
+def weather_forecast(days: int = 5) -> dict:
+    try:
+        forecast = fetch_weather_forecast(days=days)
+        return {"status": "success", "forecast": forecast}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/qa", response_model=QaResponse)
+def qa(payload: QaRequest) -> QaResponse:
+    repo = get_repo()
+    service = VoiceQaService(repo)
+    try:
+        intent, answer = service.answer_question(device_id=payload.device_id, question=payload.question)
+        return QaResponse(status="success", answer=answer, intent=intent)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/stt", response_model=SpeechToTextResponse)
+def stt(payload: SpeechToTextRequest) -> SpeechToTextResponse:
+    repo = get_repo()
+    service = VoiceQaService(repo)
+    try:
+        provider, text = service.speech_to_text(
+            audio_base64=payload.audio_base64,
+            mime_type=payload.mime_type,
+            language=payload.language,
+        )
+        return SpeechToTextResponse(status="success", text=text, provider=provider)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/tts", response_model=TextToSpeechResponse)
+def tts(payload: TextToSpeechRequest) -> TextToSpeechResponse:
+    repo = get_repo()
+    service = VoiceQaService(repo)
+    try:
+        provider, audio_base64 = service.text_to_speech(
+            text=payload.text,
+            voice=payload.voice,
+            audio_format=payload.audio_format,
+        )
+        if provider == "none":
+            return TextToSpeechResponse(status="success", provider=provider, text=payload.text)
+        return TextToSpeechResponse(status="success", provider=provider, audio_base64=audio_base64)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

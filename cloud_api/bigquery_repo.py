@@ -154,6 +154,60 @@ class BigQueryRepository:
             "weather_icon": row.weather_icon,
         }
 
+    def get_day_summary(self, device_id: str, days_ago: int) -> Dict[str, Any]:
+        query = f"""
+        SELECT
+          DATE(event_ts) AS d,
+          AVG(temperature_c) AS avg_temp_c,
+          MIN(temperature_c) AS min_temp_c,
+          MAX(temperature_c) AS max_temp_c,
+          AVG(humidity_pct) AS avg_humidity_pct,
+          MAX(humidity_pct) AS max_humidity_pct
+        FROM `{self._table(settings.indoor_table)}`
+        WHERE device_id = @device_id
+          AND DATE(event_ts) = DATE_SUB(CURRENT_DATE(), INTERVAL @days_ago DAY)
+        GROUP BY d
+        LIMIT 1
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("device_id", "STRING", device_id),
+                bigquery.ScalarQueryParameter("days_ago", "INT64", int(days_ago)),
+            ]
+        )
+        rows = list(self.client.query(query, job_config=job_config).result())
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "date": row.d.isoformat() if row.d else None,
+            "avg_temp_c": row.avg_temp_c,
+            "min_temp_c": row.min_temp_c,
+            "max_temp_c": row.max_temp_c,
+            "avg_humidity_pct": row.avg_humidity_pct,
+            "max_humidity_pct": row.max_humidity_pct,
+        }
+
+    def did_humidity_exceed(self, device_id: str, threshold_pct: float, days_ago: int) -> bool:
+        query = f"""
+        SELECT COUNT(1) AS n
+        FROM `{self._table(settings.indoor_table)}`
+        WHERE device_id = @device_id
+          AND DATE(event_ts) = DATE_SUB(CURRENT_DATE(), INTERVAL @days_ago DAY)
+          AND humidity_pct > @threshold
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("device_id", "STRING", device_id),
+                bigquery.ScalarQueryParameter("days_ago", "INT64", int(days_ago)),
+                bigquery.ScalarQueryParameter("threshold", "FLOAT64", float(threshold_pct)),
+            ]
+        )
+        rows = list(self.client.query(query, job_config=job_config).result())
+        if not rows:
+            return False
+        return bool(rows[0].n and rows[0].n > 0)
+
     @staticmethod
     def _compute_alerts(payload: IngestRequest) -> Dict[str, bool]:
         low_humidity = payload.indoor.humidity_pct < 40

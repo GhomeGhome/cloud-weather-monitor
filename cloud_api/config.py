@@ -17,6 +17,10 @@ class Settings:
     openweather_lon: float = float(os.getenv("OPENWEATHER_LON", "6.6323"))
     openweather_units: str = os.getenv("OPENWEATHER_UNITS", "metric")
     openweather_lang: str = os.getenv("OPENWEATHER_LANG", "en")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_stt_model: str = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
+    openai_tts_model: str = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 
 settings = Settings()
