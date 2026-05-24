@@ -83,3 +83,12 @@ class TextToSpeechResponse(BaseModel):
     provider: str
     audio_base64: Optional[str] = None
     text: Optional[str] = None
+
+
+class PirStateRequest(BaseModel):
+    device_id: str
+    state: str  # "on" or "off"
+
+
+class DeviceAnswerRequest(BaseModel):
+    answer: str

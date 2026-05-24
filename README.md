@@ -185,8 +185,7 @@ Scénarios manuels : **`docs/test-plan.md`**.
 
 ## Équipe
 
-| Nom | Rôle / périmètre (à compléter) |
-|-----|--------------------------------|
-| … | … |
-
-*À mettre à jour avant remise : noms, responsabilités, lien vers la vidéo dans ce README.*
+| Nom | Rôle / périmètre |
+|-----|-----------------|
+| Guillaume Grand | Cloud API (FastAPI), BigQuery, déploiement Cloud Run, firmware Core2 (MicroPython) |
+| Alexandre Marlet | Dashboard Streamlit, infrastructure GCP, intégration Voice QA / OpenAI |

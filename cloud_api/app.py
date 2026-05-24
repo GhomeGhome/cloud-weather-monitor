@@ -1,15 +1,18 @@
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from bigquery_repo import BigQueryRepository
 from config import settings
 from models import (
     AlertState,
+    DeviceAnswerRequest,
     IngestRequest,
     IngestResponse,
+    PirStateRequest,
     QaRequest,
     QaResponse,
     SpeechToTextRequest,
@@ -21,6 +24,20 @@ from voice_qa_service import VoiceQaService
 from weather_client import fetch_current_weather, fetch_weather_forecast
 
 app = FastAPI(title="Weather Ingestion API", version="0.1.0")
+
+# Allow the Streamlit dashboard (and its embedded JS components) to call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# In-memory ephemeral state (cleared on restart — fine for demo)
+# ---------------------------------------------------------------------------
+_pir_states: Dict[str, Dict] = {}    # device_id -> {state, ts}
+_device_answers: Dict[str, str] = {} # device_id -> answer text (consumed once)
 
 _repo: Optional[BigQueryRepository] = None
 
@@ -174,3 +191,37 @@ def tts(payload: TextToSpeechRequest) -> TextToSpeechResponse:
         return TextToSpeechResponse(status="success", provider=provider, audio_base64=audio_base64)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# PIR coordination endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/pir/state")
+def set_pir_state(payload: PirStateRequest) -> dict:
+    """Core2 calls this when PIR sensor activates (state='on') or deactivates (state='off')."""
+    _pir_states[payload.device_id] = {
+        "state": payload.state,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return {"status": "ok"}
+
+
+@app.get("/v1/pir/state/{device_id}")
+def get_pir_state(device_id: str) -> dict:
+    """Dashboard polls this every second to know when to show the recording banner."""
+    return _pir_states.get(device_id, {"state": "off", "ts": None})
+
+
+@app.post("/v1/device/{device_id}/answer")
+def push_device_answer(device_id: str, payload: DeviceAnswerRequest) -> dict:
+    """Dashboard pushes the QA answer here so Core2 can display it."""
+    _device_answers[device_id] = payload.answer
+    return {"status": "ok"}
+
+
+@app.get("/v1/device/{device_id}/answer")
+def get_device_answer(device_id: str) -> dict:
+    """Core2 polls this to retrieve and consume the queued answer (one-shot)."""
+    answer = _device_answers.pop(device_id, None)
+    return {"answer": answer}

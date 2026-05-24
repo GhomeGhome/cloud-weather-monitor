@@ -11,6 +11,7 @@ set -euo pipefail
 : "${PROJECT_ID:?Missing PROJECT_ID — export it or put it in .env}"
 : "${INGESTION_SHARED_SECRET:?Missing INGESTION_SHARED_SECRET — put it in .env and source .env}"
 : "${OPENWEATHER_API_KEY:?Missing OPENWEATHER_API_KEY — put it in .env and source .env}"
+: "${OPENAI_API_KEY:?Missing OPENAI_API_KEY — put it in .env and source .env}"
 
 REGION="${REGION:-europe-west6}"
 SERVICE="${CLOUD_RUN_API_SERVICE:-weather-ingestion-api}"
@@ -18,7 +19,7 @@ SERVICE="${CLOUD_RUN_API_SERVICE:-weather-ingestion-api}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-SUBST="_INGESTION_SHARED_SECRET=${INGESTION_SHARED_SECRET},_OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}"
+SUBST="_INGESTION_SHARED_SECRET=${INGESTION_SHARED_SECRET},_OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY},_OPENAI_API_KEY=${OPENAI_API_KEY}"
 
 if [[ -n "${OPENWEATHER_LAT:-}" ]]; then
   SUBST="${SUBST},_OPENWEATHER_LAT=${OPENWEATHER_LAT}"

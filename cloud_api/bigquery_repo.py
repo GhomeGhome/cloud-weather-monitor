@@ -208,6 +208,35 @@ class BigQueryRepository:
             return False
         return bool(rows[0].n and rows[0].n > 0)
 
+    def get_day_air_quality(self, device_id: str, days_ago: int) -> Dict[str, Any]:
+        query = f"""
+        SELECT
+          AVG(tvoc_ppb)  AS avg_tvoc_ppb,
+          MAX(tvoc_ppb)  AS max_tvoc_ppb,
+          AVG(eco2_ppm)  AS avg_eco2_ppm,
+          MAX(eco2_ppm)  AS max_eco2_ppm
+        FROM `{self._table(settings.indoor_table)}`
+        WHERE device_id = @device_id
+          AND DATE(event_ts) = DATE_SUB(CURRENT_DATE(), INTERVAL @days_ago DAY)
+          AND (tvoc_ppb IS NOT NULL OR eco2_ppm IS NOT NULL)
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("device_id", "STRING", device_id),
+                bigquery.ScalarQueryParameter("days_ago", "INT64", int(days_ago)),
+            ]
+        )
+        rows = list(self.client.query(query, job_config=job_config).result())
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "avg_tvoc_ppb": row.avg_tvoc_ppb,
+            "max_tvoc_ppb": row.max_tvoc_ppb,
+            "avg_eco2_ppm": row.avg_eco2_ppm,
+            "max_eco2_ppm": row.max_eco2_ppm,
+        }
+
     @staticmethod
     def _compute_alerts(payload: IngestRequest) -> Dict[str, bool]:
         low_humidity = payload.indoor.humidity_pct < 40

@@ -13,6 +13,9 @@ venv/
 secrets/
 *.json
 
+# Device secrets (copy config_example.py -> config.py and fill values)
+device/micropython/config.py
+
 # Streamlit
 .streamlit/secrets.toml
 
