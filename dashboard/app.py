@@ -5,6 +5,7 @@ from datetime import timezone, timedelta
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 _DISPLAY_TZ = timezone(timedelta(hours=2))
 
@@ -577,6 +578,7 @@ st.sidebar.markdown(
 # PAGE: REALTIME
 # ============================================================
 if page == "📡 Realtime":
+    st_autorefresh(interval=10_000, key="realtime_refresh")
 
     indoor  = latest_indoor(device_id)
     outdoor = latest_outdoor()
@@ -679,6 +681,7 @@ elif page == "📈 History":
 # PAGE: EVENTS
 # ============================================================
 elif page == "🔔 Events":
+    st_autorefresh(interval=10_000, key="events_refresh")
     _page_header(
         '<span class="bell-anim">🔔</span>',
         "Alerts & Events",
