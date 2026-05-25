@@ -429,80 +429,87 @@ def _api_tts(text: str) -> bytes | None:
     return base64.b64decode(audio_b64) if audio_b64 else None
 
 
-def _pir_auto_widget(dev_id: str) -> str:
+def _mic_button_widget(dev_id: str, compact: bool = False) -> str:
+    """Click-to-record voice QA widget — no PIR dependency."""
+    answer_css  = "" if compact else """
+#ans{margin-top:8px;padding:10px 14px;background:rgba(74,222,128,.07);
+  border-left:3px solid #4ADE80;border-radius:8px;font-size:.84em;
+  color:#86EFAC;display:none;word-wrap:break-word;line-height:1.45}"""
+    answer_html = "" if compact else '<div id="ans"></div>'
+    ans_js      = "null" if compact else "document.getElementById('ans')"
+
     return f"""<!DOCTYPE html><html><head><style>
 *{{box-sizing:border-box}}
 body{{margin:0;padding:6px 8px;background:transparent;font-family:sans-serif;color:#fff}}
-#setup button{{padding:7px 16px;background:#4FC3F7;color:#000;border:none;border-radius:6px;
-  cursor:pointer;font-size:.9em;font-weight:600}}
-#setup span{{color:#94a3b8;font-size:.82em;margin-left:8px}}
-#wrap{{display:none}}
-#st{{padding:10px 14px;border-radius:8px;font-size:.93em;font-weight:600;margin-bottom:4px}}
-#dt{{font-size:.8em;color:#94a3b8;padding:3px 6px;background:#111827;border-radius:5px;
-  display:none;word-wrap:break-word}}
-.idle{{background:#1e2130;color:#94a3b8}}
-.rec {{background:#cc2200;color:#fff;animation:pulse .9s infinite}}
-.proc{{background:#4d3800;color:#ffd}}
-.done{{background:#004d1a;color:#0f9}}
-.err {{background:#4d0000;color:#faa}}
+#btn{{width:100%;padding:9px 16px;background:rgba(56,189,248,.1);color:#7DD3FC;
+  border:1px solid rgba(56,189,248,.28);border-radius:10px;cursor:pointer;
+  font-size:.92em;font-weight:600;transition:all .15s}}
+#btn:hover:not(:disabled){{background:rgba(56,189,248,.2)}}
+#btn.rec{{background:rgba(220,38,38,.18);color:#FCA5A5;
+  border-color:rgba(220,38,38,.4);animation:pulse .9s infinite}}
+#btn.proc{{background:rgba(234,179,8,.1);color:#FDE68A;
+  border-color:rgba(234,179,8,.3);cursor:default}}
+#st{{font-size:.78em;color:#94A3B8;margin-top:5px;min-height:16px}}
+{answer_css}
 @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.6}}}}
 </style></head><body>
-<div id="setup">
-  <button onclick="init()">🎙️ Enable microphone (PIR auto-recording)</button>
-  <span>Click once — auto-records when PIR fires</span>
-</div>
-<div id="wrap">
-  <div id="st" class="idle">⏳ Waiting for PIR motion…</div>
-  <div id="dt"></div>
-</div>
+<button id="btn" onclick="toggle()">🎙️ Start recording</button>
+<div id="st">Click to record your question</div>
+{answer_html}
 <script>
 const API="{API_BASE}",DEV="{dev_id}";
-let stream=null,rec=null,chunks=[],pir="off",busy=false;
-function ss(m,c){{document.getElementById("st").textContent=m;document.getElementById("st").className=c}}
-function sd(m){{const d=document.getElementById("dt");if(m){{d.textContent=m;d.style.display="block"}}else d.style.display="none"}}
-async function init(){{
-  try{{stream=await navigator.mediaDevices.getUserMedia({{audio:true}});
-    document.getElementById("setup").style.display="none";
-    document.getElementById("wrap").style.display="block";poll();
-  }}catch(e){{alert("Microphone denied: "+e.message)}}
+const btn=document.getElementById("btn"),st=document.getElementById("st");
+const ans={ans_js};
+let stream=null,rec=null,chunks=[],recording=false,busy=false;
+
+async function toggle(){{
+  if(busy)return;
+  if(!recording)await startRec();else stopRec();
 }}
-async function poll(){{
-  if(!busy){{try{{
-    const r=await fetch(`${{API}}/v1/pir/state/${{DEV}}`);
-    const d=await r.json();const s=d.state||"off";
-    if(s==="on"&&pir!=="on"){{pir="on";startRec()}}
-    else if(s==="off"&&pir==="on"){{pir="off";stopRec()}}
-    else pir=s;
-  }}catch(e){{}}}}
-  setTimeout(poll,1000);
-}}
-function startRec(){{chunks=[];rec=new MediaRecorder(stream);
+async function startRec(){{
+  if(!stream){{
+    try{{stream=await navigator.mediaDevices.getUserMedia({{audio:true}})}}
+    catch(e){{st.textContent="Mic denied: "+e.message;return}}
+  }}
+  chunks=[];rec=new MediaRecorder(stream);
   rec.ondataavailable=e=>{{if(e.data.size>0)chunks.push(e.data)}};
-  rec.onstop=process;rec.start(100);
-  ss("🔴 Recording your question…","rec");sd("");}}
-function stopRec(){{if(rec&&rec.state!=="inactive")rec.stop();ss("⚙️ Processing…","proc")}}
+  rec.onstop=process;rec.start(100);recording=true;
+  btn.textContent="⏹ Stop & send";btn.className="rec";
+  st.textContent="Recording… click stop when done";
+  if(ans)ans.style.display="none";
+}}
+function stopRec(){{
+  if(rec&&rec.state!=="inactive")rec.stop();
+  recording=false;busy=true;
+  btn.textContent="⚙️ Processing…";btn.className="proc";
+  st.textContent="Transcribing…";
+}}
 async function process(){{
-  busy=true;const mime=rec.mimeType||"audio/webm";
-  const blob=new Blob(chunks,{{type:mime}});const b64=await blobToB64(blob);
+  const mime=rec.mimeType||"audio/webm";
+  const blob=new Blob(chunks,{{type:mime}});
+  const b64=await blobToB64(blob);
   try{{
-    sd("Transcribing…");
     const stt=await post(`${{API}}/v1/stt`,{{audio_base64:b64,mime_type:mime,language:"en"}});
     const txt=stt.text||"";
-    if(!txt){{ss("⚠️ Could not transcribe — try again","err");sd("");busy=false;return}}
-    sd("🗣️ "+txt);
-    ss("🤔 Getting answer…","proc");
+    if(!txt){{setErr("Nothing heard — try again");return}}
+    st.textContent="🗣️ "+txt;
+    btn.textContent="🤔 Thinking…";btn.className="proc";
     const qa=await post(`${{API}}/v1/qa`,{{device_id:DEV,question:txt}});
-    const ans=qa.answer||"";
-    ss("✅ "+ans,"done");sd("🗣️ "+txt);
-    post(`${{API}}/v1/device/${{DEV}}/answer`,{{answer:ans}}).catch(()=>{{}});
-    const tts=await post(`${{API}}/v1/tts`,{{text:ans,voice:"alloy",audio_format:"mp3"}});
+    const answer=qa.answer||"";
+    if(ans){{ans.textContent="💬 "+answer;ans.style.display="block"}}
+    post(`${{API}}/v1/device/${{DEV}}/answer`,{{answer}}).catch(()=>{{}});
+    btn.textContent="🔊 Speaking…";
+    const tts=await post(`${{API}}/v1/tts`,{{text:answer,voice:"alloy",audio_format:"mp3"}});
     if(tts.audio_base64)new Audio("data:audio/mp3;base64,"+tts.audio_base64).play();
-    setTimeout(()=>{{ss("⏳ Waiting for PIR motion…","idle");sd("")}},12000);
-  }}catch(e){{ss("❌ "+e.message,"err");sd("")}}
-  busy=false;
+  }}catch(e){{setErr(e.message);return}}
+  btn.textContent="🎙️ Start recording";btn.className="";busy=false;
 }}
-function blobToB64(blob){{return new Promise(res=>{{const r=new FileReader();
-  r.onloadend=()=>res(r.result.split(",")[1]);r.readAsDataURL(blob)}})}}
+function setErr(m){{
+  st.textContent="❌ "+m;
+  btn.textContent="🎙️ Start recording";btn.className="";busy=false;
+}}
+function blobToB64(b){{return new Promise(r=>{{const fr=new FileReader();
+  fr.onloadend=()=>r(fr.result.split(",")[1]);fr.readAsDataURL(b)}})}}
 async function post(url,body){{const r=await fetch(url,{{method:"POST",
   headers:{{"Content-Type":"application/json"}},body:JSON.stringify(body)}});
   if(!r.ok)throw new Error(r.status+" "+r.statusText);return r.json()}}
@@ -560,8 +567,12 @@ page         = st.sidebar.radio(
     label_visibility="collapsed",
 )
 st.sidebar.markdown("---")
-with st.sidebar.expander("🎙️ PIR Auto-Recording", expanded=True):
-    components.html(_pir_auto_widget(device_id), height=100)
+st.sidebar.markdown(
+    '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;'
+    'color:#64748B;font-weight:700;margin-bottom:6px">🎙️ Voice Assistant</div>',
+    unsafe_allow_html=True,
+)
+components.html(_mic_button_widget(device_id, compact=True), height=80)
 st.sidebar.markdown(
     f'<div style="font-size:.68rem;color:#334155;margin-top:8px;word-break:break-all">'
     f'API: {API_BASE[:45]}…</div>',
@@ -719,13 +730,13 @@ elif page == "🎙️ Voice QA":
     _page_header(
         '<span class="mic-anim">🎙️</span>',
         "Voice Assistant",
-        "PIR sensor auto-starts recording on any page · enable the mic in the sidebar once",
+        "Click the button, ask your question, get a spoken answer",
     )
 
     qa_device = st.text_input("Device ID", value=device_id, key="qa_device_id")
 
-    _section_label("📡 PIR Live Status")
-    components.html(_pir_auto_widget(qa_device), height=110)
+    _section_label("🎙️ Microphone")
+    components.html(_mic_button_widget(qa_device, compact=False), height=200)
 
     st.divider()
 
