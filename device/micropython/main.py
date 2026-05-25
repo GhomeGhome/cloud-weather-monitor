@@ -1,8 +1,8 @@
 # ============================================================
-# core2_main.py - M5Stack Core2 Weather Monitor v1.3
+# main.py - M5Stack Core2 Weather Monitor v1.5.0
 # UIFlow 1.x / MicroPython
-# Hardware: ENV III + SGP30 on PORTA (I2C splitter), PIR on PORTB
-# Buttons : A = refresh weather  B = next WiFi + connect  C = cycle pages (Home/Forecast/WiFi)
+# Hardware: ENV III + SGP30 on PORTA (I2C splitter)
+# Buttons : A = record / stop mic   B = next WiFi + connect   C = cycle pages
 # ============================================================
 
 from m5stack import *
@@ -28,7 +28,7 @@ except:
 # CONFIG - edit WIFI_NETWORKS before flashing
 # ============================================================
 DEVICE_ID    = "core2-main"
-FIRMWARE_VER = "1.4.0"
+FIRMWARE_VER = "1.5.0"
 API_BASE     = "https://weather-ingestion-api-972242315876.europe-west6.run.app"
 
 # VIDEO DEMO — credentials inlined for flashing via UIFlow (do not commit)
@@ -41,13 +41,13 @@ WIFI_NETWORKS = [
 
 UTC_OFFSET_H = 2  # Switzerland CEST; change to 1 for CET winter
 
-INGEST_INTERVAL_SEC   = 60
-WEATHER_INTERVAL_SEC  = 300
-PIR_ANNOUNCE_COOLDOWN = 30    # 30 s for testing -- set to 3600 for production
+INGEST_INTERVAL_SEC  = 60
+WEATHER_INTERVAL_SEC = 300
 
 # Voice QA (on-device recording)
-MIC_RATE    = 18000           # Hz — avoids 18 540 default pitch shift
-MIC_BUFSIZE = MIC_RATE * 2 * 3  # 3 s × 16-bit mono ≈ 108 KB
+MIC_RATE     = 18000           # Hz — avoids 18 540 default pitch shift
+MIC_MAX_SECS = 15              # max recording length (8 MB PSRAM, 540 KB)
+MIC_CHUNK    = MIC_RATE * 2 // 4  # ~0.25 s per chunk ≈ 9 000 bytes
 
 # ============================================================
 # COLORS  -  autumn palette
@@ -68,6 +68,7 @@ C_LBLUE  = 0xD09050   # amber copper          (page titles)
 MODE_NORMAL   = 0
 MODE_FORECAST = 1
 MODE_WIFI     = 2
+MODE_ANSWER   = 3
 
 mode     = MODE_NORMAL
 wifi_idx = 0
@@ -75,16 +76,16 @@ wifi_idx = 0
 # ============================================================
 # INIT SCREEN
 # 320 x 240 px  — autumn layout
-# y=2       header : title (FONT_10, left)  +  PIR dot (right x=290)
-# y=16      time HH:MM:SS  centered  (FONT_14)
+# y=2       title header (FONT_14, left)
+# y=20      time HH:MM:SS  centered  (FONT_14)
 # y=32      date YYYY/MM/DD centered  (FONT_14)
 # y=52      section label (changes per page)
 # y=68-116  4 content rows  key (x=5) / value (x=95)
 # y=132     alert banner   (FONT_10)
 # y=142     soft separator (FONT_10)
-# y=152     outdoor header / answer overflow slot 6
-# y=166     outdoor temp+desc / answer overflow slot 7
-# y=180     outdoor humidity / answer overflow slot 8
+# y=152     outdoor header / answer overflow slot 5
+# y=166     outdoor temp+desc / answer overflow slot 6
+# y=180     outdoor humidity / answer overflow slot 7
 # y=190     button divider (FONT_10)
 # y=200     button labels A / B / C
 # y=220     status bar     (FONT_10)
@@ -94,8 +95,7 @@ screen.clean_screen()
 screen.set_screen_bg_color(C_BG)
 
 # --- Header ---
-lbl_title = M5Label('Cozy Weather', x=5,   y=2,   color=C_CYAN,  font=FONT_MONT_14, parent=None)
-lbl_pir   = M5Label('',            x=290, y=2,   color=C_GREEN, font=FONT_MONT_10, parent=None)
+lbl_title = M5Label('Cozy Weather', x=5, y=2, color=C_CYAN, font=FONT_MONT_14, parent=None)
 
 # --- Time & date — centered focal point ---
 lbl_time  = M5Label('--:--:--',   x=115, y=20, color=C_WHITE, font=FONT_MONT_14, parent=None)
@@ -195,14 +195,6 @@ _sgp30_ok = _SGP30_ADDR in _found and _init_sgp30()
 _sht30_ok = _SHT30_ADDR in _found
 print("[SENSOR] SHT30:", "ok" if _sht30_ok else "NOT FOUND")
 print("[SENSOR] SGP30:", "ok" if _sgp30_ok else "NOT FOUND")
-
-# PIR stays on PORTB - different bus, no issue
-pir = None
-try:
-    pir = unit.get(unit.PIR, unit.PORTB)
-    print("[SENSOR] PIR ok on PORTB")
-except Exception as e:
-    print("[SENSOR] PIR error:", e)
 
 # ============================================================
 # UTILITIES
@@ -327,11 +319,6 @@ def read_sensors():
         tvoc, eco2 = _read_sgp30()
         r["tvoc_ppb"] = tvoc
         r["eco2_ppm"] = eco2
-    if pir:
-        try:
-            r["motion"] = bool(pir.state)
-        except Exception as e:
-            print("[SENSOR] PIR error:", e)
     return r
 
 # ============================================================
@@ -376,7 +363,7 @@ def show_indoor_mode(r):
     # Show outdoor section
     lbl_sep.set_text('. ' * 20)
     lbl_out_hdr.set_text('~ outside ~')
-    set_btn_labels("speak", "wifi", "forecast>")
+    set_btn_labels("micro", "wifi", "next >")
 
 # ============================================================
 # DISPLAY - FORECAST MODE
@@ -556,55 +543,9 @@ def api_qa(question):
         set_status(str(e)[:42], C_RED)
         return None
 
-def api_pir_state(state):
-    """Notify the API of PIR state change: 'on' or 'off'."""
-    try:
-        body = ujson.dumps({"device_id": DEVICE_ID, "state": state})
-        r = urequests.post(API_BASE + "/v1/pir/state",
-                           data=body,
-                           headers={"Content-Type": "application/json"})
-        r.close()
-    except Exception as e:
-        print("[PIR] api_pir_state error:", e)
-
-def api_get_answer():
-    """Poll for a queued answer from the dashboard. Returns string or None (consumed once)."""
-    try:
-        r = urequests.get(API_BASE + "/v1/device/{}/answer".format(DEVICE_ID))
-        if r.status_code == 200:
-            d = ujson.loads(r.text)
-            r.close()
-            return d.get("answer")
-        r.close()
-        return None
-    except Exception as e:
-        print("[PIR] api_get_answer error:", e)
-        return None
-
 # ============================================================
 # VOICE QA SCREEN HELPERS
 # ============================================================
-
-def _show_voice_qa_screen():
-    """Cozy 'dashboard is listening' screen shown when PIR fires."""
-    lbl_section.set_text("~ speaking ~")
-    lbl_section.set_text_color(C_CYAN)
-    lbl_alert.set_text("")
-    lbl_sep.set_text("")
-    lbl_out_hdr.set_text("")
-    lbl_out_temp.set_text("")
-    lbl_out_desc.set_text("")
-    lbl_out_hum.set_text("")
-    lbl_r0_k.set_text("dashboard is")
-    lbl_r0_v.set_text("")
-    lbl_r1_k.set_text("listening...")
-    lbl_r1_v.set_text("")
-    lbl_r2_k.set_text("ask away!")
-    lbl_r2_v.set_text("")
-    lbl_r3_k.set_text("")
-    lbl_r3_v.set_text("")
-    set_status("recording your question...", C_CYAN)
-
 
 def _show_answer_screen(answer):
     """
@@ -674,31 +615,38 @@ def _beep(n=1):
 
 
 # ============================================================
-# VOICE QA — on-device pipeline (no Dashboard needed)
+# VOICE QA — on-device pipeline (button A to start, button A to stop)
 # Record → STT → QA → TTS → speaker.playRaw()
 # ============================================================
 def _voice_qa_local():
     """
-    Full on-device voice pipeline:
-      1. Record MIC_BUFSIZE bytes via I2S PDM mic at MIC_RATE Hz
+    Full on-device voice pipeline — variable-duration recording.
+      1. Record via I2S PDM mic at MIC_RATE Hz until button A pressed again
+         (or MIC_MAX_SECS reached)
       2. POST /v1/stt  (Whisper) → transcript
       3. POST /v1/qa   (GPT)     → answer  → displayed immediately
       4. POST /v1/tts  (OpenAI, device=True) → 8 kHz PCM → speaker.playRaw()
+      5. Switch to MODE_ANSWER; button C returns home
     gc.collect() is called after each large buffer to avoid OOM.
     """
-    # ---- 1. Record ------------------------------------------------
+    global mode
+
+    max_bytes = MIC_RATE * 2 * MIC_MAX_SECS  # 540 KB — safe with Core2 8 MB PSRAM
+
+    # ---- 1. Record (variable duration) ----------------------------
     lbl_section.set_text("~ listening ~")
     lbl_section.set_text_color(C_CYAN)
     for lbl in [lbl_r0_k, lbl_r0_v, lbl_r1_k, lbl_r1_v,
                 lbl_r2_k, lbl_r2_v, lbl_r3_k, lbl_r3_v, lbl_alert]:
         lbl.set_text("")
-    lbl_r0_k.set_text("recording 3s...")
+    lbl_r0_k.set_text("press A to stop")
     lbl_r1_k.set_text("speak now!")
     lbl_sep.set_text("")
     lbl_out_hdr.set_text("")
     lbl_out_temp.set_text("")
     lbl_out_desc.set_text("")
     lbl_out_hum.set_text("")
+    set_btn_labels("stop", "wifi", "")
     set_status("mic open...", C_CYAN)
     _beep(1)
 
@@ -711,11 +659,21 @@ def _voice_qa_local():
                   dataformat=I2S.B16,
                   channelformat=I2S.ONLY_RIGHT,
                   samplerate=MIC_RATE)
-        buf = bytearray(MIC_BUFSIZE)
+        buf = bytearray(max_bytes)
+        tmp = bytearray(MIC_CHUNK)
+        pos = 0
         utime.sleep_ms(200)          # let mic stabilise
-        n = mic.readinto(buf)
+        while pos + MIC_CHUNK <= max_bytes:
+            n = mic.readinto(tmp)
+            buf[pos:pos + n] = tmp[:n]
+            pos += n
+            elapsed = pos // (MIC_RATE * 2)
+            lbl_r2_k.set_text("{}s  (max {}s)".format(elapsed, MIC_MAX_SECS))
+            if btnA.wasPressed():    # second press → stop recording
+                break
         mic.deinit()
-        raw = bytes(buf[:n])
+        del tmp
+        raw = bytes(buf[:pos])
         del buf
     except Exception as e:
         set_status("mic error: " + str(e)[:30], C_RED)
@@ -799,6 +757,10 @@ def _voice_qa_local():
         # TTS failure is non-fatal — answer is already on screen
         set_status("TTS skip: " + str(e)[:28], C_ORANGE)
 
+    # Switch to dedicated answer page; button C returns home
+    mode = MODE_ANSWER
+    set_btn_labels("", "wifi", "home")
+
 
 # ============================================================
 # WIFI
@@ -848,14 +810,8 @@ def main():
 
     last_ingest_ts    = 0
     last_weather_ts   = 0
-    last_pir_ts       = -PIR_ANNOUNCE_COOLDOWN
     last_reconnect_ts = 0
     last_ntp_ts       = 0
-    # PIR Voice QA state machine
-    pir_was_active    = False
-    pir_listening     = False
-    last_answer_poll  = 0
-    answer_display_ts = 0
     cached_weather    = {}
     cached_forecast   = {}
     last_reading      = read_sensors()
@@ -930,75 +886,20 @@ def main():
             if _local_time()[0] >= 2024:
                 set_status("clock is set!", C_GREEN)
 
-        # ---- PIR state machine ------------------------------------------------
-        pir_now = False
-        if pir:
-            try:
-                pir_now = bool(pir.state)
-            except:
-                pass
-
-        # Header indicator
-        if pir_now:
-            lbl_pir.set_text("MOT")
-            lbl_pir.set_text_color(C_GREEN)
-        else:
-            lbl_pir.set_text("")
-
-        # Rising edge: PIR just turned ON
-        if pir_now and not pir_was_active:
-            if wifi_ok and not pir_listening and (now - last_pir_ts) >= PIR_ANNOUNCE_COOLDOWN:
-                last_pir_ts = now
-                _show_voice_qa_screen()
-                api_pir_state("on")
-                _beep(1)
-                pir_listening = True
-
-        # Falling edge: PIR just turned OFF (while we were listening)
-        elif not pir_now and pir_was_active and pir_listening:
-            api_pir_state("off")
-            set_status("thinking...", C_YELLOW)
-
-        pir_was_active = pir_now
-
-        # Poll for dashboard answer every 3 s while listening (timeout 20 s)
-        if pir_listening:
-            if (now - last_pir_ts) >= 20:
-                pir_listening = False
-                api_pir_state("off")
-                if mode == MODE_NORMAL:
-                    show_indoor_mode(last_reading)
-                    update_outdoor_display(cached_weather)
-                set_status("no answer yet... try again", C_ORANGE)
-            elif wifi_ok and (now - last_answer_poll) >= 3:
-                last_answer_poll = now
-                got = api_get_answer()
-                if got:
-                    _show_answer_screen(got)
-                    pir_listening = False
-                    answer_display_ts = now
-
-        # Return to normal display 15 s after showing the answer
-        if answer_display_ts and (now - answer_display_ts) >= 15:
-            answer_display_ts = 0
-            if mode == MODE_NORMAL:
-                show_indoor_mode(last_reading)
-                update_outdoor_display(cached_weather)
-            set_status("cozy and ready  :)", C_GREEN)
-
         # Read sensors every cycle
         last_reading = read_sensors()
 
         # --- Render current page ---
         if mode == MODE_NORMAL:
-            if not pir_listening and not answer_display_ts:
-                show_indoor_mode(last_reading)
+            show_indoor_mode(last_reading)
 
         elif mode == MODE_FORECAST:
             show_forecast_mode(cached_forecast)
 
         elif mode == MODE_WIFI:
             show_wifi_mode(wifi_conn_status)
+
+        # MODE_ANSWER: static — _voice_qa_local() already drew everything
 
         # --- Periodic ingest ---
         if wifi_ok and (now - last_ingest_ts >= INGEST_INTERVAL_SEC):
@@ -1016,12 +917,11 @@ def main():
                     update_outdoor_display(w)
                 last_weather_ts = now
 
-        # ---- Button A: speak (home) / refresh forecast / connect wifi ----
+        # ---- Button A: micro (home) / refresh forecast / connect wifi ----
         if btnA.wasPressed():
             if mode == MODE_NORMAL:
                 if wifi_ok:
                     _voice_qa_local()
-                    answer_display_ts = utime.time()
                 else:
                     set_status("no wifi  :(", C_RED)
             elif mode == MODE_FORECAST:
@@ -1055,9 +955,14 @@ def main():
             wifi_conn_status = "all good :)" if wifi_ok else "failed :("
             show_wifi_mode(wifi_conn_status)
 
-        # ---- Button C: cycle pages  Home -> Forecast -> WiFi -> Home ----
+        # ---- Button C: cycle pages  Home -> Forecast -> WiFi -> Home / Answer -> Home ----
         if btnC.wasPressed():
-            if mode == MODE_NORMAL:
+            if mode == MODE_ANSWER:
+                mode = MODE_NORMAL
+                show_indoor_mode(last_reading)
+                update_outdoor_display(cached_weather)
+                set_status("back home  :)", C_GREEN)
+            elif mode == MODE_NORMAL:
                 mode = MODE_FORECAST
                 wifi_conn_status = ""
                 set_status("peeking at forecast...", C_YELLOW)
