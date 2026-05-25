@@ -768,6 +768,7 @@ def _voice_qa_local():
             if audio_b64:
                 audio_raw = ubinascii.a2b_base64(audio_b64)
                 del audio_b64; gc.collect()
+                speaker.setVolume(10)
                 speaker.playRaw(audio_raw,
                                 sample_rate=8000,
                                 data_format=speaker.F16B,
