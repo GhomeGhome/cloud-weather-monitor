@@ -770,9 +770,9 @@ def _voice_qa_local():
                 del audio_b64; gc.collect()
                 speaker.setVolume(10)
                 speaker.playRaw(audio_raw,
-                                sample_rate=8000,
+                                sample_rate=24000,
                                 data_format=speaker.F16B,
-                                channel=speaker.CHN_L)
+                                channel=speaker.CHN_LR)
                 del audio_raw; gc.collect()
         else:
             r.close()

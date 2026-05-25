@@ -427,8 +427,9 @@ class VoiceQaService:
         response.raise_for_status()
 
         if device:
-            pcm_8k = _downsample_pcm(response.content)
-            return "openai", base64.b64encode(pcm_8k).decode("ascii")
+            # Return raw 24 kHz PCM — Core2 plays at sample_rate=24000
+            # No downsampling: avoids amplitude loss, better quality
+            return "openai", base64.b64encode(response.content).decode("ascii")
 
         return "openai", base64.b64encode(response.content).decode("ascii")
 
