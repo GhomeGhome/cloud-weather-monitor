@@ -427,9 +427,9 @@ class VoiceQaService:
         response.raise_for_status()
 
         if device:
-            # Return raw 24 kHz PCM — Core2 plays at sample_rate=24000
-            # No downsampling: avoids amplitude loss, better quality
-            return "openai", base64.b64encode(response.content).decode("ascii")
+            # Decimate 24 kHz → 8 kHz (keep every 3rd sample, no averaging)
+            # Decimation preserves full amplitude; averaging would divide it by 3.
+            return "openai", base64.b64encode(_downsample_pcm(response.content)).decode("ascii")
 
         return "openai", base64.b64encode(response.content).decode("ascii")
 

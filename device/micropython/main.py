@@ -753,7 +753,7 @@ def _voice_qa_local():
     _show_answer_screen(answer if answer else "no answer received")
 
     # ---- 4. TTS → speaker -----------------------------------------
-    set_status("speaking...", C_CYAN)
+    set_status("loading audio...", C_YELLOW)
     try:
         body     = ujson.dumps({"text": answer, "voice": "alloy",
                                 "audio_format": "pcm", "device": True})
@@ -768,9 +768,10 @@ def _voice_qa_local():
             if audio_b64:
                 audio_raw = ubinascii.a2b_base64(audio_b64)
                 del audio_b64; gc.collect()
+                set_status("speaking...", C_CYAN)
                 speaker.setVolume(10)
                 speaker.playRaw(audio_raw,
-                                sample_rate=24000,
+                                sample_rate=8000,
                                 data_format=speaker.F16B,
                                 channel=speaker.CHN_LR)
                 del audio_raw; gc.collect()
