@@ -88,11 +88,11 @@ screen.clean_screen()
 screen.set_screen_bg_color(C_BG)
 
 # --- Header ---
-lbl_title = M5Label('~ cozy nest ~', x=5,   y=2,   color=C_CYAN,  font=FONT_MONT_10, parent=None)
-lbl_pir   = M5Label('',              x=290, y=2,   color=C_GREEN, font=FONT_MONT_10, parent=None)
+lbl_title = M5Label('Cozy Weather', x=5,   y=2,   color=C_CYAN,  font=FONT_MONT_14, parent=None)
+lbl_pir   = M5Label('',            x=290, y=2,   color=C_GREEN, font=FONT_MONT_10, parent=None)
 
 # --- Time & date — centered focal point ---
-lbl_time  = M5Label('--:--:--',   x=115, y=16, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_time  = M5Label('--:--:--',   x=115, y=20, color=C_WHITE, font=FONT_MONT_14, parent=None)
 lbl_date  = M5Label('----/--/--', x=105, y=32, color=C_GRAY,  font=FONT_MONT_14, parent=None)
 
 # --- Section header ---
