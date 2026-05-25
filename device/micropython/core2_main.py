@@ -1,5 +1,5 @@
 # ============================================================
-# core2_main.py - M5Stack Core2 Weather Monitor v1.2
+# core2_main.py - M5Stack Core2 Weather Monitor v1.3
 # UIFlow 1.x / MicroPython
 # Hardware: ENV III + SGP30 on PORTA (I2C splitter), PIR on PORTB
 # Buttons : A = refresh weather  B = next WiFi + connect  C = cycle pages (Home/Forecast/WiFi)
@@ -26,7 +26,7 @@ except:
 # CONFIG - edit WIFI_NETWORKS before flashing
 # ============================================================
 DEVICE_ID    = "core2-main"
-FIRMWARE_VER = "1.2.0"
+FIRMWARE_VER = "1.3.0"
 API_BASE     = "https://weather-ingestion-api-972242315876.europe-west6.run.app"
 
 # Secrets loaded from config.py (not committed to git).
@@ -44,17 +44,17 @@ WEATHER_INTERVAL_SEC  = 300
 PIR_ANNOUNCE_COOLDOWN = 30    # 30 s for testing -- set to 3600 for production
 
 # ============================================================
-# COLORS  -  cozy warm night palette
+# COLORS  -  autumn palette
 # ============================================================
-C_BG     = 0x000000   # deep black background
-C_WHITE  = 0xFFF0DC   # warm cream           (primary text)
-C_GREEN  = 0x88D498   # sage green           (good / normal values)
-C_RED    = 0xFF6E6E   # soft coral           (alerts / bad)
-C_ORANGE = 0xFFAA77   # warm peach           (warnings)
-C_YELLOW = 0xFFD080   # soft gold            (outdoor / forecast)
-C_CYAN   = 0xFFB347   # warm amber           (section headers / title)
-C_GRAY   = 0x8899AA   # blue-slate           (secondary / time)
-C_LBLUE  = 0xC0A0E0   # soft lavender        (page titles)
+C_BG     = 0x1A0800   # deep mahogany         (background)
+C_WHITE  = 0xE8C09A   # warm parchment        (primary text / time)
+C_GREEN  = 0x90C060   # sage green            (good / normal values)
+C_RED    = 0xFF4422   # autumn flame          (alerts / bad)
+C_ORANGE = 0xD06828   # burnt orange          (warnings)
+C_YELLOW = 0xF0A028   # golden maple          (outdoor / forecast)
+C_CYAN   = 0xC85828   # terracotta            (section headers / title)
+C_GRAY   = 0xB08060   # warm mocha            (secondary / date)
+C_LBLUE  = 0xD09050   # amber copper          (page titles)
 
 # ============================================================
 # DISPLAY MODES
@@ -68,63 +68,67 @@ wifi_idx = 0
 
 # ============================================================
 # INIT SCREEN
-# 320 x 240 px
-# y=2      header : title + PIR dot + time/date
-# y=28     section label (changes per page)
-# y=44-98  4 content rows  key (x=5) / value (x=95)
-# y=118    alert banner  (FONT_MONT_10)
-# y=130    soft separator  (FONT_MONT_10)
-# y=140    outdoor header / answer overflow slot 6
-# y=156    outdoor temp+desc / answer overflow slot 7
-# y=174    outdoor humidity / answer overflow slot 8
-# y=186    button divider  (FONT_MONT_10)
-# y=196    button labels A / B / C
-# y=218    status bar  (FONT_MONT_10)
+# 320 x 240 px  — autumn layout
+# y=2       header : title (FONT_10, left)  +  PIR dot (right x=290)
+# y=16      time HH:MM:SS  centered  (FONT_14)
+# y=32      date YYYY/MM/DD centered  (FONT_14)
+# y=52      section label (changes per page)
+# y=68-116  4 content rows  key (x=5) / value (x=95)
+# y=132     alert banner   (FONT_10)
+# y=142     soft separator (FONT_10)
+# y=152     outdoor header / answer overflow slot 6
+# y=166     outdoor temp+desc / answer overflow slot 7
+# y=180     outdoor humidity / answer overflow slot 8
+# y=190     button divider (FONT_10)
+# y=200     button labels A / B / C
+# y=220     status bar     (FONT_10)
 # ============================================================
 screen = M5Screen()
 screen.clean_screen()
 screen.set_screen_bg_color(C_BG)
 
 # --- Header ---
-lbl_title = M5Label('~ cozy nest ~', x=5,   y=2,  color=C_CYAN,  font=FONT_MONT_14, parent=None)
-lbl_pir   = M5Label('',              x=240, y=2,  color=C_GREEN, font=FONT_MONT_10, parent=None)
-lbl_time  = M5Label('--:--:--',      x=258, y=2,  color=C_GRAY,  font=FONT_MONT_10, parent=None)
-lbl_date  = M5Label('----/--/--',    x=244, y=14, color=C_GRAY,  font=FONT_MONT_10, parent=None)
+lbl_title = M5Label('~ cozy nest ~', x=5,   y=2,   color=C_CYAN,  font=FONT_MONT_10, parent=None)
+lbl_pir   = M5Label('',              x=290, y=2,   color=C_GREEN, font=FONT_MONT_10, parent=None)
+
+# --- Time & date — centered focal point ---
+lbl_time  = M5Label('--:--:--',   x=115, y=16, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_date  = M5Label('----/--/--', x=105, y=32, color=C_GRAY,  font=FONT_MONT_14, parent=None)
 
 # --- Section header ---
-lbl_section = M5Label('~ inside ~', x=5, y=28, color=C_LBLUE, font=FONT_MONT_14, parent=None)
+lbl_section = M5Label('~ inside ~', x=5, y=52, color=C_LBLUE, font=FONT_MONT_14, parent=None)
 
 # --- 4 content rows (reused across all pages) ---
-lbl_r0_k = M5Label('warmth',   x=5,  y=44,  color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r0_v = M5Label('--.-C',    x=95, y=44,  color=C_GREEN, font=FONT_MONT_14, parent=None)
-lbl_r1_k = M5Label('moisture', x=5,  y=62,  color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r1_v = M5Label('--.-%',    x=95, y=62,  color=C_GREEN, font=FONT_MONT_14, parent=None)
-lbl_r2_k = M5Label('air vibe', x=5,  y=80,  color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r2_v = M5Label('--- ppb',  x=95, y=80,  color=C_GREEN, font=FONT_MONT_14, parent=None)
-lbl_r3_k = M5Label('breath',   x=5,  y=98,  color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r3_v = M5Label('---- ppm', x=95, y=98,  color=C_GREEN, font=FONT_MONT_14, parent=None)
+lbl_r0_k = M5Label('warmth',   x=5,  y=68,  color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_r0_v = M5Label('--.-C',    x=95, y=68,  color=C_GREEN, font=FONT_MONT_14, parent=None)
+lbl_r1_k = M5Label('moisture', x=5,  y=84,  color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_r1_v = M5Label('--.-%',    x=95, y=84,  color=C_GREEN, font=FONT_MONT_14, parent=None)
+lbl_r2_k = M5Label('air vibe', x=5,  y=100, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_r2_v = M5Label('--- ppb',  x=95, y=100, color=C_GREEN, font=FONT_MONT_14, parent=None)
+lbl_r3_k = M5Label('breath',   x=5,  y=116, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_r3_v = M5Label('---- ppm', x=95, y=116, color=C_GREEN, font=FONT_MONT_14, parent=None)
 
 # --- Alert banner ---
-lbl_alert = M5Label('', x=5, y=118, color=C_RED, font=FONT_MONT_10, parent=None)
+lbl_alert = M5Label('', x=5, y=132, color=C_RED, font=FONT_MONT_10, parent=None)
 
 # --- Outdoor section (home page) / answer overflow lines 5-8 ---
-lbl_sep      = M5Label('. ' * 20,    x=0,   y=130, color=C_GRAY,   font=FONT_MONT_10, parent=None)
-lbl_out_hdr  = M5Label('~ outside ~',x=5,   y=140, color=C_LBLUE,  font=FONT_MONT_14, parent=None)
-lbl_out_temp = M5Label('--.-C',      x=5,   y=156, color=C_YELLOW, font=FONT_MONT_14, parent=None)
-lbl_out_desc = M5Label('---',        x=100, y=156, color=C_YELLOW, font=FONT_MONT_14, parent=None)
-lbl_out_hum  = M5Label('hum: --%',   x=5,   y=174, color=C_YELLOW, font=FONT_MONT_10, parent=None)
+lbl_sep      = M5Label('. ' * 20,    x=0,   y=142, color=C_GRAY,   font=FONT_MONT_10, parent=None)
+lbl_out_hdr  = M5Label('~ outside ~',x=5,   y=152, color=C_LBLUE,  font=FONT_MONT_14, parent=None)
+lbl_out_temp = M5Label('--.-C',      x=5,   y=166, color=C_YELLOW, font=FONT_MONT_14, parent=None)
+lbl_out_desc = M5Label('---',        x=100, y=166, color=C_YELLOW, font=FONT_MONT_14, parent=None)
+lbl_out_hum  = M5Label('hum: --%',   x=5,   y=180, color=C_YELLOW, font=FONT_MONT_10, parent=None)
 
 # --- Button label divider ---
-lbl_btn_sep = M5Label('- ' * 21, x=0, y=186, color=C_GRAY, font=FONT_MONT_10, parent=None)
+lbl_btn_sep = M5Label('- ' * 21, x=0, y=190, color=C_GRAY, font=FONT_MONT_10, parent=None)
 
 # --- 3 button labels (centered above A / B / C touch buttons) ---
 # Core2 button centers: A~x=53  B~x=160  C~x=267
-lbl_btn_a = M5Label('refresh', x=10,  y=196, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_btn_b = M5Label('wifi',    x=133, y=196, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_btn_c = M5Label('next >',  x=236, y=196, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_btn_a = M5Label('refresh', x=10,  y=200, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_btn_b = M5Label('wifi',    x=133, y=200, color=C_WHITE, font=FONT_MONT_14, parent=None)
+lbl_btn_c = M5Label('next >',  x=236, y=200, color=C_WHITE, font=FONT_MONT_14, parent=None)
 
 # --- Status bar ---
-lbl_status = M5Label('starting up...', x=5, y=218, color=C_GRAY, font=FONT_MONT_10, parent=None)
+lbl_status = M5Label('starting up...', x=5, y=220, color=C_GRAY, font=FONT_MONT_10, parent=None)
 
 # ============================================================
 # INIT SENSORS
@@ -257,15 +261,25 @@ def _iso_to_epoch(ts):
     return days * 86400 + h * 3600 + mi * 60 + s
 
 def sync_ntp():
-    """Sync time: NTP first (needs UDP/123), then /live API fallback."""
+    """Sync time: NTP first, then verify utime.time() is valid, then /live API fallback.
+
+    Problem: ntptime.settime() may set the RTC but utime.time() on UIFlow1 doesn't
+    always reflect it immediately, leaving the clock at 2000-01-01.
+    Fix: always check the result and fall through to the API offset method if needed.
+    """
     global _time_offset
     if _HAS_NTP:
         try:
             ntptime.settime()
-            print("[NTP] synced")
-            return
+            print("[NTP] settime() called")
         except Exception as e:
             print("[NTP] failed:", e)
+    # Check if utime.time() is now valid (year >= 2024)
+    if utime.localtime(utime.time())[0] >= 2024:
+        _time_offset = 0
+        print("[TIME] clock ok via NTP, year:", utime.localtime(utime.time())[0])
+        return
+    # utime.time() still wrong — compute offset from API /live timestamp
     try:
         r = urequests.get(API_BASE + "/live")
         ts = ujson.loads(r.text).get("ts", "")
@@ -434,10 +448,10 @@ def show_wifi_mode(conn_status=""):
         live_ssid = "--"
 
     lbl_r0_k.set_text("network")
-    lbl_r0_v.set_text(ssid[:18])
+    lbl_r0_v.set_text(ssid[:22])
     lbl_r0_v.set_text_color(C_WHITE)
     lbl_r1_k.set_text("connected")
-    lbl_r1_v.set_text(live_ssid[:18])
+    lbl_r1_v.set_text(live_ssid[:22])
     lbl_r1_v.set_text_color(C_GREEN if is_ok else C_GRAY)
     lbl_r2_k.set_text("slot")
     lbl_r2_v.set_text(net_num)
@@ -591,11 +605,11 @@ def _show_answer_screen(answer):
     Display the QA answer using up to 8 display slots for full text.
 
     Slots and approx char capacity (word-wrapped):
-      0-3  : lbl_r0_k .. lbl_r3_k  (FONT_MONT_14, y=44..98,  ~30 chars each)
-      4    : lbl_alert              (FONT_MONT_10, y=118,      ~42 chars)
-      5    : lbl_out_hdr            (FONT_MONT_14, y=140,      ~30 chars)
-      6    : lbl_out_temp           (FONT_MONT_14, y=156,      ~30 chars)
-      7    : lbl_out_hum            (FONT_MONT_10, y=174,      ~42 chars)
+      0-3  : lbl_r0_k .. lbl_r3_k  (FONT_MONT_14, y=68..116, ~30 chars each)
+      4    : lbl_alert              (FONT_MONT_10, y=132,      ~42 chars)
+      5    : lbl_out_hdr            (FONT_MONT_14, y=152,      ~30 chars)
+      6    : lbl_out_temp           (FONT_MONT_14, y=166,      ~30 chars)
+      7    : lbl_out_hum            (FONT_MONT_10, y=180,      ~42 chars)
     Total capacity ~260 chars -- enough for any QA response.
     """
     lbl_section.set_text("~ answer ~")
