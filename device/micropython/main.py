@@ -1,790 +1,705 @@
 # ============================================================
-# main.py - M5Stack Core2 Weather Monitor v1.5.0
-# UIFlow 1.x / MicroPython
-# Hardware: ENV III + SGP30 on PORTA (I2C splitter)
-# Buttons : A = record / stop mic   B = next WiFi + connect   C = cycle pages
+# main.py  —  M5Stack Core2 Weather Monitor v2.0.0
+# Pure MicroPython, NO UIFlow UI framework
+# Display : lcd primitives (fillRect / print / line)
+# Volume  : direct I2C → AW88298 amplifier (max gain)
+# Buttons : A = micro   B = wifi cycle   C = next page
+# Themes  : autumn / night / rain / snow  (time + weather)
 # ============================================================
 
-from m5stack import *
-from m5stack_ui import *
-from uiflow import *
-from machine import I2C, Pin, RTC, I2S
-import gc
-import struct
-import ubinascii
-import time
-import utime
-import unit
-import urequests
-import ujson
-import network
+from m5stack import lcd, speaker, btnA, btnB, btnC
+from machine import I2C, Pin, I2S
+import gc, struct, ubinascii, time, utime, network, urequests, ujson
 
 try:
-    import ntptime
-    _HAS_NTP = True
+    import ntptime; _HAS_NTP = True
 except:
     _HAS_NTP = False
 
 # ============================================================
-# CONFIG - edit WIFI_NETWORKS before flashing
+# CONFIG
 # ============================================================
 DEVICE_ID    = "core2-main"
-FIRMWARE_VER = "1.5.0"
+FIRMWARE_VER = "2.0.0"
 API_BASE     = "https://weather-ingestion-api-972242315876.europe-west6.run.app"
 
-# VIDEO DEMO — credentials inlined for flashing via UIFlow (do not commit)
-# TODO: revert to config.py pattern after demo
-INGEST_SECRET = "iuvxiquoxbpq28e382fd92owexb9823gdp2icduweobx"
-WIFI_NETWORKS = [
-    ("iPhone de Guillaume (2)", "d2kcrrd4rx9x"),
-    ("iot-unil", "4u6uch4hpY9pJ2f9"),
-]
+try:
+    from config import INGEST_SECRET, WIFI_NETWORKS
+except ImportError:
+    INGEST_SECRET = "changeme"
+    WIFI_NETWORKS = [("YourSSID", "YourPassword")]
 
-UTC_OFFSET_H = 2  # Switzerland CEST; change to 1 for CET winter
-
+UTC_OFFSET_H         = 2
 INGEST_INTERVAL_SEC  = 60
 WEATHER_INTERVAL_SEC = 300
-
-# Voice QA (on-device recording)
-MIC_RATE     = 18000           # Hz — avoids 18 540 default pitch shift
-MIC_MAX_SECS = 15              # max recording length (8 MB PSRAM, 540 KB)
-MIC_CHUNK    = MIC_RATE * 2 // 4  # ~0.25 s per chunk ≈ 9 000 bytes
+MIC_RATE             = 18000
+MIC_MAX_SECS         = 15
+MIC_CHUNK            = MIC_RATE * 2 // 4   # ~0.25 s per chunk
 
 # ============================================================
-# COLORS  -  autumn palette
+# COLORS  (RGB565)
 # ============================================================
-C_BG     = 0x1A0800   # deep mahogany         (background)
-C_WHITE  = 0xE8C09A   # warm parchment        (primary text / time)
-C_GREEN  = 0x90C060   # sage green            (good / normal values)
-C_RED    = 0xFF4422   # autumn flame          (alerts / bad)
-C_ORANGE = 0xD06828   # burnt orange          (warnings)
-C_YELLOW = 0xF0A028   # golden maple          (outdoor / forecast)
-C_CYAN   = 0xC85828   # terracotta            (section headers / title)
-C_GRAY   = 0xB08060   # warm mocha            (secondary / date)
-C_LBLUE  = 0xD09050   # amber copper          (page titles)
+def _rgb(r, g, b):
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+# ============================================================
+# THEMES  — autumn / night / rain / snow
+# ============================================================
+_THEMES = {
+    "autumn": dict(
+        bg    = _rgb( 22,  8,  2),
+        fg    = _rgb(230,190,150),
+        accent= _rgb(200,100, 35),
+        good  = _rgb(130,185, 80),
+        warn  = _rgb(235,155, 35),
+        bad   = _rgb(250, 60, 30),
+        card  = _rgb( 40, 15,  3),
+        dim   = _rgb(120, 80, 45),
+        icon  = "Autumn",
+    ),
+    "night": dict(
+        bg    = _rgb(  4,  8, 28),
+        fg    = _rgb(175,200,235),
+        accent= _rgb( 90,130,215),
+        good  = _rgb( 70,175,135),
+        warn  = _rgb(175,155, 55),
+        bad   = _rgb(215, 75, 75),
+        card  = _rgb(  8, 18, 48),
+        dim   = _rgb( 80,100,150),
+        icon  = "Night",
+    ),
+    "rain": dict(
+        bg    = _rgb( 12, 22, 38),
+        fg    = _rgb(155,185,210),
+        accent= _rgb( 50,125,175),
+        good  = _rgb( 75,175,155),
+        warn  = _rgb(175,155, 55),
+        bad   = _rgb(195, 75, 75),
+        card  = _rgb( 18, 32, 52),
+        dim   = _rgb( 75,110,145),
+        icon  = "Rain",
+    ),
+    "snow": dict(
+        bg    = _rgb( 10, 18, 35),
+        fg    = _rgb(200,220,240),
+        accent= _rgb(150,200,240),
+        good  = _rgb(100,200,180),
+        warn  = _rgb(200,180,100),
+        bad   = _rgb(220,100,100),
+        card  = _rgb( 15, 25, 50),
+        dim   = _rgb(100,130,170),
+        icon  = "Snow",
+    ),
+}
+
+_theme_name = "autumn"
+
+def T(k):
+    return _THEMES[_theme_name][k]
+
+def pick_theme(hour, weather_main=""):
+    w = (weather_main or "").lower()
+    if hour >= 20 or hour < 7:
+        return "night"
+    if any(x in w for x in ("snow", "sleet", "blizzard")):
+        return "snow"
+    if any(x in w for x in ("rain", "drizzle", "thunder", "storm")):
+        return "rain"
+    return "autumn"
+
+def weather_emoji(main=""):
+    m = (main or "").lower()
+    if "thunder" in m: return "[storm]"
+    if "snow"    in m: return "[snow]"
+    if "drizzle" in m: return "[drizzle]"
+    if "rain"    in m: return "[rain]"
+    if "clear"   in m: return "[sun]"
+    if "cloud"   in m: return "[cloud]"
+    if any(x in m for x in ("mist","fog","haze")): return "[fog]"
+    return "[sky]"
+
+def weather_advice(main=""):
+    m = (main or "").lower()
+    if any(x in m for x in ("thunder", "storm")): return "Stay inside!"
+    if any(x in m for x in ("rain", "drizzle")):  return "Take an umbrella"
+    if "snow" in m:                                return "Dress warm"
+    if "clear" in m:                               return "Great day outside"
+    return ""
 
 # ============================================================
 # DISPLAY MODES
 # ============================================================
-MODE_NORMAL   = 0
-MODE_FORECAST = 1
-MODE_WIFI     = 2
-MODE_ANSWER   = 3
+MODE_HOME      = 0
+MODE_FORECAST  = 1
+MODE_WIFI      = 2
+MODE_RECORDING = 3
+MODE_ANSWER    = 4
 
-mode     = MODE_NORMAL
+mode     = MODE_HOME
 wifi_idx = 0
 
 # ============================================================
-# INIT SCREEN
-# 320 x 240 px  — autumn layout
-# y=2       title header (FONT_14, left)
-# y=20      time HH:MM:SS  centered  (FONT_14)
-# y=32      date YYYY/MM/DD centered  (FONT_14)
-# y=52      section label (changes per page)
-# y=68-116  4 content rows  key (x=5) / value (x=95)
-# y=132     alert banner   (FONT_10)
-# y=142     soft separator (FONT_10)
-# y=152     outdoor header / answer overflow slot 5
-# y=166     outdoor temp+desc / answer overflow slot 6
-# y=180     outdoor humidity / answer overflow slot 7
-# y=190     button divider (FONT_10)
-# y=200     button labels A / B / C
-# y=220     status bar     (FONT_10)
+# LCD PRIMITIVES
 # ============================================================
-screen = M5Screen()
-screen.clean_screen()
-screen.set_screen_bg_color(C_BG)
+W, H = 320, 240
 
-# --- Header ---
-lbl_title = M5Label('Cozy Weather', x=5, y=2, color=C_CYAN, font=FONT_MONT_14, parent=None)
+lcd.setBrightness(100)
 
-# --- Time & date — centered focal point ---
-lbl_time  = M5Label('--:--:--',   x=115, y=20, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_date  = M5Label('----/--/--', x=105, y=32, color=C_GRAY,  font=FONT_MONT_14, parent=None)
+def fill(x, y, w, h, col):
+    lcd.fillRect(x, y, w, h, col)
 
-# --- Section header ---
-lbl_section = M5Label('~ inside ~', x=5, y=52, color=C_LBLUE, font=FONT_MONT_14, parent=None)
+def cls():
+    fill(0, 0, W, H, T("bg"))
 
-# --- 4 content rows (reused across all pages) ---
-lbl_r0_k = M5Label('warmth',   x=5,  y=68,  color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r0_v = M5Label('--.-C',    x=95, y=68,  color=C_GREEN, font=FONT_MONT_14, parent=None)
-lbl_r1_k = M5Label('moisture', x=5,  y=84,  color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r1_v = M5Label('--.-%',    x=95, y=84,  color=C_GREEN, font=FONT_MONT_14, parent=None)
-lbl_r2_k = M5Label('air vibe', x=5,  y=100, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r2_v = M5Label('--- ppb',  x=95, y=100, color=C_GREEN, font=FONT_MONT_14, parent=None)
-lbl_r3_k = M5Label('breath',   x=5,  y=116, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_r3_v = M5Label('---- ppm', x=95, y=116, color=C_GREEN, font=FONT_MONT_14, parent=None)
+def hline(y, col=None):
+    lcd.line(0, y, W - 1, y, col if col is not None else T("dim"))
 
-# --- Alert banner ---
-lbl_alert = M5Label('', x=5, y=132, color=C_RED, font=FONT_MONT_10, parent=None)
+def txt(x, y, s, fg, bg, font=lcd.FONT_Default):
+    lcd.font(font)
+    lcd.setColor(fg, bg)
+    lcd.print(str(s), x, y)
 
-# --- Outdoor section (home page) / answer overflow lines 5-8 ---
-lbl_sep      = M5Label('. ' * 20,    x=0,   y=142, color=C_GRAY,   font=FONT_MONT_10, parent=None)
-lbl_out_hdr  = M5Label('~ outside ~',x=5,   y=152, color=C_LBLUE,  font=FONT_MONT_14, parent=None)
-lbl_out_temp = M5Label('--.-C',      x=5,   y=166, color=C_YELLOW, font=FONT_MONT_14, parent=None)
-lbl_out_desc = M5Label('---',        x=100, y=166, color=C_YELLOW, font=FONT_MONT_14, parent=None)
-lbl_out_hum  = M5Label('hum: --%',   x=5,   y=180, color=C_YELLOW, font=FONT_MONT_10, parent=None)
+def txt_c(y, s, fg, bg, font=lcd.FONT_Default):
+    """Print text centered on screen, clearing its row first."""
+    lcd.font(font)
+    w = lcd.textWidth(str(s))
+    x = max(0, (W - w) // 2)
+    fill(0, y, W, 26, bg)
+    lcd.setColor(fg, bg)
+    lcd.print(str(s), x, y)
 
-# --- Button label divider ---
-lbl_btn_sep = M5Label('- ' * 21, x=0, y=190, color=C_GRAY, font=FONT_MONT_10, parent=None)
-
-# --- 3 button labels (centered above A / B / C touch buttons) ---
-# Core2 button centers: A~x=53  B~x=160  C~x=267
-lbl_btn_a = M5Label('refresh', x=10,  y=200, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_btn_b = M5Label('wifi',    x=133, y=200, color=C_WHITE, font=FONT_MONT_14, parent=None)
-lbl_btn_c = M5Label('next >',  x=236, y=200, color=C_WHITE, font=FONT_MONT_14, parent=None)
-
-# --- Status bar ---
-lbl_status = M5Label('starting up...', x=5, y=220, color=C_GRAY, font=FONT_MONT_10, parent=None)
+def btn_bar(a="", b="", c=""):
+    fill(0, 200, W, 40, T("card"))
+    hline(200)
+    lcd.line(106, 203, 106, 237, T("dim"))
+    lcd.line(213, 203, 213, 237, T("dim"))
+    if a: txt(8,   212, a, T("fg"),  T("card"))
+    if b: txt(118, 212, b, T("fg"),  T("card"))
+    if c: txt(220, 212, c, T("fg"),  T("card"))
 
 # ============================================================
-# INIT SENSORS
-# Direct I2C at low frequency (100 kHz) to avoid bus errors with splitter.
-# PORTA on Core2 : SDA=GPIO32, SCL=GPIO33
+# AW88298 — direct I2C for maximum volume
+# Register 0x0C bits[14:8] = VOL (0 = 0 dB = loudest)
 # ============================================================
-time.sleep(1)  # let all sensors power up before touching the bus
+_amp = None
+try:
+    _amp = I2C(0, scl=Pin(22), sda=Pin(21), freq=400000)
+    _amp.writeto_mem(0x36, 0x0C, b'\x00\x00')
+    print("[AMP] AW88298 set to max volume")
+except Exception as e:
+    print("[AMP] init error:", e)
+    _amp = None
 
-_I2C_PORTA = I2C(1, scl=Pin(33), sda=Pin(32), freq=100000)
-
-# --- SHT30 (temp + humidity inside ENV III) - address 0x44 ---
-_SHT30_ADDR = 0x44
-
-def _read_sht30():
-    """Returns (temperature_c, humidity_pct) or (None, None)."""
+def amp_max():
     try:
-        _I2C_PORTA.writeto(_SHT30_ADDR, b'\x2C\x06')  # single-shot, high repeatability
-        time.sleep_ms(50)
-        data = _I2C_PORTA.readfrom(_SHT30_ADDR, 6)
-        t_raw = (data[0] << 8) | data[1]
-        h_raw = (data[3] << 8) | data[4]
-        return round(-45.0 + 175.0 * t_raw / 65535.0, 1), round(100.0 * h_raw / 65535.0, 1)
-    except Exception as e:
-        print("[SHT30] error:", e)
-        return None, None
-
-# --- SGP30 (TVOC + eCO2) - address 0x58 ---
-_SGP30_ADDR = 0x58
-
-def _init_sgp30():
-    try:
-        _I2C_PORTA.writeto(_SGP30_ADDR, b'\x20\x03')  # init_air_quality
-        time.sleep_ms(10)
-        print("[SGP30] init ok")
-        return True
-    except Exception as e:
-        print("[SGP30] init error:", e)
-        return False
-
-def _read_sgp30():
-    """Returns (tvoc_ppb, eco2_ppm) or (None, None)."""
-    try:
-        _I2C_PORTA.writeto(_SGP30_ADDR, b'\x20\x08')  # measure_air_quality
-        time.sleep_ms(12)
-        data = _I2C_PORTA.readfrom(_SGP30_ADDR, 6)
-        eco2 = (data[0] << 8) | data[1]
-        tvoc = (data[3] << 8) | data[4]
-        return tvoc, eco2
-    except Exception as e:
-        print("[SGP30] read error:", e)
-        return None, None
-
-# Scan bus and init
-_found = _I2C_PORTA.scan()
-print("[I2C] devices found:", [hex(a) for a in _found])
-
-_sgp30_ok = _SGP30_ADDR in _found and _init_sgp30()
-_sht30_ok = _SHT30_ADDR in _found
-print("[SENSOR] SHT30:", "ok" if _sht30_ok else "NOT FOUND")
-print("[SENSOR] SGP30:", "ok" if _sgp30_ok else "NOT FOUND")
-
-# ============================================================
-# UTILITIES
-# ============================================================
-def set_status(msg, color=C_GRAY):
-    lbl_status.set_text(str(msg)[:42])
-    lbl_status.set_text_color(color)
-
-def set_btn_labels(a, b, c):
-    lbl_btn_a.set_text(a)
-    lbl_btn_b.set_text(b)
-    lbl_btn_c.set_text(c)
-
-def safe_float(val, decimals=1):
-    try:
-        return round(float(val), decimals)
+        if _amp:
+            _amp.writeto_mem(0x36, 0x0C, b'\x00\x00')
     except:
-        return None
+        pass
+    speaker.setVolume(10)
 
-def color_for_temp(t):
-    if t is None: return C_GRAY
-    if t < 18:    return C_LBLUE
-    if t < 26:    return C_GREEN
-    return C_RED
+# ============================================================
+# SENSORS  (SHT30 + SGP30 on PORTA — I2C bus 1)
+# ============================================================
+_I2C1 = I2C(1, scl=Pin(33), sda=Pin(32), freq=100000)
+_SHT30, _SGP30 = 0x44, 0x58
 
-def color_for_hum(h):
-    if h is None: return C_GRAY
-    if h < 30:    return C_RED
-    if h < 40:    return C_ORANGE
-    if h <= 70:   return C_GREEN
-    return C_LBLUE
+def _sht30():
+    try:
+        _I2C1.writeto(_SHT30, b'\x2C\x06'); time.sleep_ms(50)
+        d = _I2C1.readfrom(_SHT30, 6)
+        return (round(-45 + 175 * ((d[0]<<8)|d[1]) / 65535, 1),
+                round(100 * ((d[3]<<8)|d[4]) / 65535, 1))
+    except:
+        return None, None
 
-def color_for_tvoc(v):
-    if v is None: return C_GRAY
-    if v < 220:   return C_GREEN
-    if v < 660:   return C_YELLOW
-    return C_RED
+def _sgp30_init():
+    try: _I2C1.writeto(_SGP30, b'\x20\x03'); time.sleep_ms(10); return True
+    except: return False
 
-def color_for_co2(v):
-    if v is None: return C_GRAY
-    if v < 1000:  return C_GREEN
-    if v < 2000:  return C_YELLOW
-    return C_RED
+def _sgp30():
+    try:
+        _I2C1.writeto(_SGP30, b'\x20\x08'); time.sleep_ms(12)
+        d = _I2C1.readfrom(_SGP30, 6)
+        return (d[3]<<8)|d[4], (d[0]<<8)|d[1]   # tvoc, eco2
+    except:
+        return None, None
+
+_found    = _I2C1.scan()
+_sht30_ok = _SHT30 in _found
+_sgp30_ok = _SGP30 in _found and _sgp30_init()
+print("[I2C] found:", [hex(a) for a in _found])
+
+def read_sensors():
+    r = {"temperature_c":None,"humidity_pct":None,
+         "tvoc_ppb":None,"eco2_ppm":None,"motion":False}
+    if _sht30_ok: r["temperature_c"], r["humidity_pct"] = _sht30()
+    if _sgp30_ok: r["tvoc_ppb"],      r["eco2_ppm"]     = _sgp30()
+    return r
+
+def c_temp(v):
+    if v is None: return T("dim")
+    return T("good") if 18 <= v <= 26 else T("warn") if v < 30 else T("bad")
+
+def c_hum(v):
+    if v is None: return T("dim")
+    if v < 30:    return T("bad")
+    if v < 40:    return T("warn")
+    if v <= 70:   return T("good")
+    return T("warn")
+
+def c_tvoc(v):
+    if v is None: return T("dim")
+    return T("good") if v < 220 else T("warn") if v < 660 else T("bad")
+
+def c_co2(v):
+    if v is None: return T("dim")
+    return T("good") if v < 1000 else T("warn") if v < 2000 else T("bad")
 
 # ============================================================
 # NTP + TIME
 # ============================================================
 _time_offset = 0
 
-def _iso_to_epoch(ts):
-    """ISO UTC string -> seconds since MicroPython epoch (2000-01-01)."""
-    y  = int(ts[0:4]); mo = int(ts[5:7]); d  = int(ts[8:10])
-    h  = int(ts[11:13]); mi = int(ts[14:16]); s  = int(ts[17:19])
-    days = 0
-    for yr in range(2000, y):
-        days += 366 if yr % 4 == 0 and (yr % 100 != 0 or yr % 400 == 0) else 365
+def _iso_epoch(ts):
+    y,mo,d = int(ts[0:4]),int(ts[5:7]),int(ts[8:10])
+    h,mi,s = int(ts[11:13]),int(ts[14:16]),int(ts[17:19])
+    days = sum(366 if yr%4==0 and (yr%100!=0 or yr%400==0) else 365
+               for yr in range(2000, y))
     dm = [31, 29 if y%4==0 and (y%100!=0 or y%400==0) else 28,
           31,30,31,30,31,31,30,31,30,31]
-    for m in range(1, mo):
-        days += dm[m-1]
-    days += d - 1
-    return days * 86400 + h * 3600 + mi * 60 + s
+    for m in range(1, mo): days += dm[m-1]
+    return (days + d - 1) * 86400 + h*3600 + mi*60 + s
 
 def sync_ntp():
-    """Sync time: NTP first, then verify utime.time() is valid, then /live API fallback.
-
-    Problem: ntptime.settime() may set the RTC but utime.time() on UIFlow1 doesn't
-    always reflect it immediately, leaving the clock at 2000-01-01.
-    Fix: always check the result and fall through to the API offset method if needed.
-    """
     global _time_offset
     if _HAS_NTP:
-        try:
-            ntptime.settime()
-            print("[NTP] settime() called")
-        except Exception as e:
-            print("[NTP] failed:", e)
-    # Check if utime.time() is now valid (year >= 2024)
+        try: ntptime.settime()
+        except: pass
     if utime.localtime(utime.time())[0] >= 2024:
-        _time_offset = 0
-        print("[TIME] clock ok via NTP, year:", utime.localtime(utime.time())[0])
-        return
-    # utime.time() still wrong — compute offset from API /live timestamp
+        _time_offset = 0; return
     try:
         r = urequests.get(API_BASE + "/live")
-        ts = ujson.loads(r.text).get("ts", "")
-        r.close()
+        ts = ujson.loads(r.text).get("ts", ""); r.close()
         if len(ts) >= 19:
-            _time_offset = _iso_to_epoch(ts) - utime.time()
-            print("[TIME] offset from API:", _time_offset)
-    except Exception as e:
-        print("[TIME] all sync failed:", e)
+            _time_offset = _iso_epoch(ts) - utime.time()
+    except:
+        pass
 
-def _real_utc():
+def _utc():
     return utime.time() + _time_offset
 
-def _local_time():
-    return utime.localtime(_real_utc() + UTC_OFFSET_H * 3600)
+def _local():
+    return utime.localtime(_utc() + UTC_OFFSET_H * 3600)
 
-def get_time_str():
-    t = _local_time()
-    return "{:02d}:{:02d}:{:02d}".format(t[3], t[4], t[5])
+_DAYS   = ("Mon","Tue","Wed","Thu","Fri","Sat","Sun")
+_MONTHS = ("Jan","Feb","Mar","Apr","May","Jun",
+           "Jul","Aug","Sep","Oct","Nov","Dec")
 
-def get_date_str():
-    t = _local_time()
-    return "{:04d}/{:02d}/{:02d}".format(t[0], t[1], t[2])
-
-# ============================================================
-# SENSORS
-# ============================================================
-def read_sensors():
-    r = {
-        "temperature_c": None, "humidity_pct": None,
-        "pressure_hpa": None,  "tvoc_ppb": None,
-        "eco2_ppm": None,      "motion": False,
-    }
-    if _sht30_ok:
-        t, h = _read_sht30()
-        r["temperature_c"] = t
-        r["humidity_pct"]  = h
-    if _sgp30_ok:
-        tvoc, eco2 = _read_sgp30()
-        r["tvoc_ppb"] = tvoc
-        r["eco2_ppm"] = eco2
-    return r
+def time_hm():  t = _local(); return "{:02d}:{:02d}".format(t[3], t[4])
+def time_sec(): t = _local(); return ":{:02d}".format(t[5])
+def date_str(): t = _local(); return "{} {} {}".format(_DAYS[t[6]], t[2], _MONTHS[t[1]-1])
 
 # ============================================================
-# DISPLAY - INDOOR MODE
+# DISPLAY — HOME  (réveil style)
+#
+#  y=0-27   indoor strip  (temp / hum / tvoc / co2)
+#  y=28     separator
+#  y=30-107 clock  HH:MM  DejaVu72 centered
+#  y=107    seconds  :SS  DejaVu18
+#  y=118    date  DejaVu18 centered
+#  y=136    separator
+#  y=138-195 outdoor  (emoji + temp + desc + advice)
+#  y=196    separator
+#  y=200-239 button bar
 # ============================================================
-def show_indoor_mode(r):
-    t    = r["temperature_c"]
-    h    = r["humidity_pct"]
+def draw_home(r, weather=None, status=""):
+    global _theme_name
+    t_now  = _local()
+    w_main = ""
+    if weather:
+        w_main = str(weather.get("weather", {}).get("weather_main", ""))
+    _theme_name = pick_theme(t_now[3], w_main)
+
+    cls()
+
+    # ── Indoor strip ─────────────────────────────────────────
+    fill(0, 0, W, 28, T("card"))
+    t_c  = r["temperature_c"]
+    h_p  = r["humidity_pct"]
     tvoc = r["tvoc_ppb"]
     co2  = r["eco2_ppm"]
 
-    lbl_section.set_text("~ inside ~")
-    lbl_section.set_text_color(C_LBLUE)
+    def fv(v, fmt, fb): return fmt.format(v) if v is not None else fb
 
-    lbl_r0_k.set_text("warmth")
-    lbl_r0_v.set_text("{:.1f} C".format(t) if t is not None else "-- C")
-    lbl_r0_v.set_text_color(color_for_temp(t))
+    metrics = [
+        (fv(t_c,  "T:{:.0f}C",  "T:--"),  c_temp(t_c)),
+        (fv(h_p,  "H:{:.0f}%",  "H:--"),  c_hum(h_p)),
+        (fv(tvoc, "V:{}ppb",    "V:---"),  c_tvoc(tvoc)),
+        (fv(co2,  "C:{}ppm",    "C:----"), c_co2(co2)),
+    ]
+    cw = W // 4
+    for i, (val, col) in enumerate(metrics):
+        txt(i * cw + 4, 6, val, col, T("card"))
 
-    lbl_r1_k.set_text("moisture")
-    lbl_r1_v.set_text("{:.0f} %".format(h) if h is not None else "-- %")
-    lbl_r1_v.set_text_color(color_for_hum(h))
+    hline(28)
 
-    lbl_r2_k.set_text("air vibe")
-    lbl_r2_v.set_text("{} ppb".format(tvoc) if tvoc is not None else "--- ppb")
-    lbl_r2_v.set_text_color(color_for_tvoc(tvoc))
+    # ── Clock  HH:MM ─────────────────────────────────────────
+    fill(0, 30, W, 90, T("bg"))
+    hm = time_hm()
+    lcd.font(lcd.FONT_DejaVu72)
+    hw = lcd.textWidth(hm)
+    hx = (W - hw) // 2
+    lcd.setColor(T("fg"), T("bg"))
+    lcd.print(hm, hx, 30)
 
-    lbl_r3_k.set_text("breath")
-    lbl_r3_v.set_text("{} ppm".format(co2) if co2 is not None else "---- ppm")
-    lbl_r3_v.set_text_color(color_for_co2(co2))
+    # Seconds :SS  (smaller, bottom-right of clock)
+    sc = time_sec()
+    lcd.font(lcd.FONT_DejaVu18)
+    sw = lcd.textWidth(sc)
+    fill(hx + hw, 95, sw + 4, 20, T("bg"))
+    lcd.setColor(T("dim"), T("bg"))
+    lcd.print(sc, hx + hw + 2, 97)
 
-    # Alert banner: highest-priority alert only
-    alerts = []
-    if h is not None and h < 40:
-        alerts.append("  air is dry  ({:.0f}%)".format(h))
-    if tvoc is not None and tvoc >= 660:
-        alerts.append("  air feels stuffy  (TVOC hi)")
-    if co2 is not None and co2 >= 2000:
-        alerts.append("  open a window! ({} ppm)".format(co2))
-    lbl_alert.set_text(alerts[0][:42] if alerts else "")
-    lbl_alert.set_text_color(C_RED)
+    # ── Date ─────────────────────────────────────────────────
+    txt_c(120, date_str(), T("accent"), T("bg"), lcd.FONT_DejaVu18)
 
-    # Show outdoor section
-    lbl_sep.set_text('. ' * 20)
-    lbl_out_hdr.set_text('~ outside ~')
-    set_btn_labels("micro", "wifi", "forecast")
+    # ── Outdoor ──────────────────────────────────────────────
+    hline(140)
+    fill(0, 141, W, 57, T("card"))
+
+    if weather:
+        wd      = weather.get("weather", {})
+        out_t   = wd.get("temperature_c")
+        out_h   = wd.get("humidity_pct")
+        out_desc = str(wd.get("weather_description") or w_main or "").capitalize()[:18]
+        emj     = weather_emoji(w_main)
+        advice  = weather_advice(w_main)
+        temp_s  = "{:.0f}C".format(out_t)  if out_t is not None else "--C"
+        hum_s   = "hum {:.0f}%".format(out_h) if out_h is not None else ""
+        txt(6, 144, emj + " " + temp_s + "  " + out_desc, T("warn"),   T("card"))
+        if advice:
+            txt(6, 160, advice,                              T("accent"), T("card"))
+        txt(6, 176, hum_s,                                   T("dim"),   T("card"))
+    else:
+        txt(6, 158, "no outdoor data", T("dim"), T("card"))
+
+    hline(198)
+    btn_bar("micro", "wifi", "forecast")
+    if status:
+        fill(0, 226, W, 14, T("card"))
+        txt(8, 226, status, T("dim"), T("card"))
+
+
+def _update_clock_only():
+    """Partial update: redraw only clock + seconds, no full cls()."""
+    fill(0, 30, W, 90, T("bg"))
+    hm = time_hm()
+    lcd.font(lcd.FONT_DejaVu72)
+    hw = lcd.textWidth(hm)
+    hx = (W - hw) // 2
+    lcd.setColor(T("fg"), T("bg"))
+    lcd.print(hm, hx, 30)
+
+    sc = time_sec()
+    lcd.font(lcd.FONT_DejaVu18)
+    sw = lcd.textWidth(sc)
+    fill(hx + hw, 95, sw + 6, 22, T("bg"))
+    lcd.setColor(T("dim"), T("bg"))
+    lcd.print(sc, hx + hw + 2, 97)
+
 
 # ============================================================
-# DISPLAY - FORECAST MODE
+# DISPLAY — FORECAST
 # ============================================================
-def show_forecast_mode(forecast_data):
-    lbl_section.set_text("~ coming up ~")
-    lbl_section.set_text_color(C_CYAN)
-    lbl_alert.set_text("")
-    lbl_sep.set_text("")
-    lbl_out_hdr.set_text("")
-    lbl_out_temp.set_text("")
-    lbl_out_desc.set_text("")
-    lbl_out_hum.set_text("")
-
-    row_keys = [lbl_r0_k, lbl_r1_k, lbl_r2_k, lbl_r3_k]
-    row_vals = [lbl_r0_v, lbl_r1_v, lbl_r2_v, lbl_r3_v]
+def draw_forecast(fc_data, status=""):
+    cls()
+    fill(0, 0, W, 28, T("card"))
+    txt(6, 6, "Forecast  4 days", T("accent"), T("card"))
+    hline(28)
 
     days = []
-    if isinstance(forecast_data, dict):
-        fc = forecast_data.get("forecast", {})
-        if isinstance(fc, dict):
-            days = fc.get("daily", [])
-        elif isinstance(fc, list):
-            days = fc
+    if isinstance(fc_data, dict):
+        fc = fc_data.get("forecast", {})
+        if isinstance(fc, dict):   days = fc.get("daily", [])
+        elif isinstance(fc, list): days = fc
 
-    _months = ["Jan","Feb","Mar","Apr","May","Jun",
-               "Jul","Aug","Sep","Oct","Nov","Dec"]
-
+    ROW_H = 38
     for i in range(4):
+        y = 32 + i * (ROW_H + 2)
+        fill(0, y, W, ROW_H, T("card"))
         if i < len(days):
             d    = days[i]
             date = str(d.get("date", ""))
-            tmin = d.get("temp_min_c")
-            tmax = d.get("temp_max_c")
-            desc = str(d.get("weather_main") or d.get("weather_description") or "")[:10]
-            try:
-                m_idx = int(date[5:7]) - 1
-                date_short = "{} {}".format(int(date[8:10]), _months[m_idx])
-            except:
-                date_short = date[:6]
-            row_keys[i].set_text(date_short)
-            row_keys[i].set_text_color(C_WHITE)
-            if tmin is not None and tmax is not None:
-                temp_str = "{:.0f}/{:.0f}C {}".format(tmin, tmax, desc)
-            else:
-                temp_str = "--/--C {}".format(desc)
-            row_vals[i].set_text(temp_str[:22])
-            row_vals[i].set_text_color(C_YELLOW)
+            tmin = d.get("temp_min_c"); tmax = d.get("temp_max_c")
+            w_m  = str(d.get("weather_main") or "")
+            desc = str(d.get("weather_description") or w_m or "")[:16]
+            try:   date_s = "{} {}".format(int(date[8:10]), _MONTHS[int(date[5:7])-1])
+            except: date_s = date[:6]
+            temp_s = "{:.0f}/{:.0f}C".format(tmin, tmax) if tmin and tmax else "--/--C"
+            txt(6,   y+5,  weather_emoji(w_m), T("warn"),   T("card"))
+            txt(28,  y+5,  date_s,             T("accent"),  T("card"))
+            txt(100, y+5,  temp_s,             T("fg"),      T("card"))
+            txt(6,   y+20, desc,               T("dim"),     T("card"))
         else:
-            row_keys[i].set_text("--")
-            row_vals[i].set_text("no data")
+            txt(6, y + 12, "no data", T("dim"), T("card"))
+        hline(y + ROW_H)
 
-    set_btn_labels("refresh", "wifi", "wifi >")
+    btn_bar("refresh", "wifi", "wifi >")
+    if status:
+        fill(0, 226, W, 14, T("card"))
+        txt(8, 226, status, T("dim"), T("card"))
 
-# ============================================================
-# DISPLAY - WIFI MODE
-# ============================================================
-def show_wifi_mode(conn_status=""):
-    lbl_section.set_text("~ wifi ~")
-    lbl_section.set_text_color(C_ORANGE)
-    lbl_sep.set_text("")
-    lbl_out_hdr.set_text("")
-    lbl_out_temp.set_text("")
-    lbl_out_desc.set_text("")
-    lbl_out_hum.set_text("")
-    lbl_alert.set_text("")
-
-    ssid, pw = WIFI_NETWORKS[wifi_idx]
-    net_num  = "{} / {}".format(wifi_idx + 1, len(WIFI_NETWORKS))
-
-    is_ok = _wlan.isconnected()
-    try:
-        live_ssid = _wlan.config("essid") if is_ok else "--"
-    except:
-        live_ssid = "--"
-
-    lbl_r0_k.set_text("network")
-    lbl_r0_v.set_text(ssid[:22])
-    lbl_r0_v.set_text_color(C_WHITE)
-    lbl_r1_k.set_text("connected")
-    lbl_r1_v.set_text(live_ssid[:22])
-    lbl_r1_v.set_text_color(C_GREEN if is_ok else C_GRAY)
-    lbl_r2_k.set_text("slot")
-    lbl_r2_v.set_text(net_num)
-    lbl_r2_v.set_text_color(C_GRAY)
-
-    if not conn_status:
-        conn_status = "all good :)" if is_ok else "not connected"
-    lbl_r3_k.set_text("status")
-    lbl_r3_v.set_text(conn_status[:18])
-    lbl_r3_v.set_text_color(C_GREEN if is_ok else C_ORANGE)
-
-    set_btn_labels("connect", "next", "home >")
 
 # ============================================================
-# OUTDOOR DISPLAY
+# DISPLAY — WIFI
 # ============================================================
-def update_outdoor_display(w):
-    try:
-        wd   = w.get("weather", {}) if isinstance(w, dict) else {}
-        temp = wd.get("temperature_c")
-        desc = str(wd.get("weather_description") or "n/a")
-        hum  = wd.get("humidity_pct")
-        lbl_out_temp.set_text("{:.1f}C".format(float(temp)) if temp is not None else "--.-C")
-        lbl_out_desc.set_text(desc[:16])
-        lbl_out_hum.set_text("hum: {}%".format(int(hum)) if hum is not None else "hum: --%")
-    except Exception as e:
-        print("[DISPLAY] outdoor error:", e)
+def draw_wifi(conn_status=""):
+    cls()
+    fill(0, 0, W, 28, T("card"))
+    txt(6, 6, "WiFi settings", T("accent"), T("card"))
+    hline(28)
+
+    ssid, _ = WIFI_NETWORKS[wifi_idx]
+    is_ok   = _wlan.isconnected()
+    try:    live = _wlan.config("essid") if is_ok else "--"
+    except: live = "--"
+
+    rows = [
+        ("network",   ssid[:22],
+         T("fg")),
+        ("connected", live[:22],
+         T("good") if is_ok else T("dim")),
+        ("slot",      "{} / {}".format(wifi_idx + 1, len(WIFI_NETWORKS)),
+         T("fg")),
+        ("status",    (conn_status or ("ok :)" if is_ok else "not connected"))[:20],
+         T("good") if is_ok else T("warn")),
+    ]
+    for i, (lbl, val, col) in enumerate(rows):
+        y = 32 + i * 38
+        fill(0, y, W, 36, T("card"))
+        txt(6,  y + 5, lbl, T("dim"), T("card"))
+        txt(96, y + 5, val, col,      T("card"))
+        hline(y + 36)
+
+    btn_bar("connect", "next", "home")
+
+
+# ============================================================
+# DISPLAY — RECORDING
+# ============================================================
+def draw_recording(elapsed=0):
+    fill(0, 30, W, 168, T("bg"))
+    # Central REC card
+    fill(W//2 - 55, 45, 110, 72, T("card"))
+    lcd.drawRect(W//2 - 55, 45, 110, 72, T("accent"))
+    lcd.font(lcd.FONT_DejaVu40)
+    lcd.setColor(T("accent"), T("card"))
+    rw = lcd.textWidth("REC")
+    lcd.print("REC", W//2 - rw//2, 55)
+    # Elapsed
+    es = "{}s / {}s".format(elapsed, MIC_MAX_SECS)
+    lcd.font(lcd.FONT_DejaVu18)
+    ew = lcd.textWidth(es)
+    fill(0, 125, W, 22, T("bg"))
+    lcd.setColor(T("warn"), T("bg"))
+    lcd.print(es, (W - ew)//2, 126)
+    # Hint
+    lcd.font(lcd.FONT_Default)
+    hw = lcd.textWidth("press A to stop")
+    fill(0, 152, W, 14, T("bg"))
+    lcd.setColor(T("dim"), T("bg"))
+    lcd.print("press A to stop", (W - hw)//2, 153)
+
+
+# ============================================================
+# DISPLAY — ANSWER
+# ============================================================
+def draw_answer(answer, status=""):
+    cls()
+    fill(0, 0, W, 28, T("card"))
+    txt(6, 6, "Answer", T("accent"), T("card"))
+    hline(28)
+    fill(0, 30, W, 168, T("card"))
+
+    # Word-wrap into ~38-char lines
+    words = (answer or "").split()
+    lines = []; line = ""
+    for w in words:
+        if len(line) + 1 + len(w) > 38 and line:
+            lines.append(line); line = w
+        else:
+            line = (line + " " + w).strip() if line else w
+    if line: lines.append(line)
+
+    for i, ln in enumerate(lines[:9]):
+        col = T("good") if i < 3 else T("fg")
+        txt(8, 33 + i * 18, ln, col, T("card"))
+
+    hline(198)
+    btn_bar("", "wifi", "home")
+    if status:
+        fill(0, 226, W, 14, T("card"))
+        txt(8, 226, status, T("dim"), T("card"))
+
+
+# ============================================================
+# STATUS BAR
+# ============================================================
+def set_status(msg, color=None):
+    fill(0, 226, W, 14, T("card"))
+    txt(8, 226, str(msg)[:48], color if color is not None else T("dim"), T("card"))
+
 
 # ============================================================
 # API CALLS
 # ============================================================
-
 def _get_json(url):
     try:
-        r = urequests.get(url)
-        txt = r.text
-        r.close()
-        return ujson.loads(txt)
+        r = urequests.get(url); s = r.text; r.close()
+        return ujson.loads(s)
     except Exception as e:
-        set_status(str(e)[:42], C_RED)
-        return None
+        set_status(str(e)[:46], T("bad")); return None
 
-def api_weather_current():
-    return _get_json(API_BASE + "/v1/weather/current?refresh=true")
-
-def api_weather_forecast(days=4):
-    return _get_json(API_BASE + "/v1/weather/forecast?days={}".format(days))
-
-def api_latest():
-    return _get_json(API_BASE + "/v1/device/{}/latest".format(DEVICE_ID))
+def api_weather_current():     return _get_json(API_BASE + "/v1/weather/current?refresh=true")
+def api_weather_forecast(d=4): return _get_json(API_BASE + "/v1/weather/forecast?days={}".format(d))
+def api_latest():              return _get_json(API_BASE + "/v1/device/{}/latest".format(DEVICE_ID))
 
 def api_ingest(reading):
-    t_c   = reading["temperature_c"]
-    h_pct = reading["humidity_pct"]
-    if t_c is None or h_pct is None:
-        return None
+    tc = reading["temperature_c"]; hp = reading["humidity_pct"]
+    if tc is None or hp is None: return None
     try:
-        t = utime.localtime(_real_utc())
-        if t[0] < 2024:
-            return None
+        t = utime.localtime(_utc())
+        if t[0] < 2024: return None
         body = ujson.dumps({
-            "secret":    INGEST_SECRET,
-            "device_id": DEVICE_ID,
+            "secret": INGEST_SECRET, "device_id": DEVICE_ID,
             "timestamp": "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}Z".format(*t[:6]),
-            "indoor":  {"temperature_c": t_c, "humidity_pct": h_pct,
+            "indoor":  {"temperature_c": tc, "humidity_pct": hp,
                         "tvoc_ppb": reading["tvoc_ppb"], "eco2_ppm": reading["eco2_ppm"]},
-            "motion":  {"detected": reading["motion"], "pir_sensor_id": "pir-portb"},
+            "motion":  {"detected": False, "pir_sensor_id": "none"},
             "meta":    {"firmware_version": FIRMWARE_VER, "wifi_ssid": WIFI_SSID},
         })
-        r = urequests.post(API_BASE + "/v1/ingest",
-                           data=body,
-                           headers={"Content-Type": "application/json"})
-        code = r.status_code
-        r.close()
-        if code != 200:
-            set_status("ingest HTTP " + str(code), C_RED)
-            return False
-        return True
+        r    = urequests.post(API_BASE + "/v1/ingest", data=body,
+                              headers={"Content-Type": "application/json"})
+        code = r.status_code; r.close()
+        return code == 200
     except Exception as e:
-        set_status("ingest err: " + str(e)[:30], C_RED)
-        return False
-
-def api_qa(question):
-    try:
-        body = ujson.dumps({"device_id": DEVICE_ID, "question": question})
-        r = urequests.post(API_BASE + "/v1/qa",
-                           data=body,
-                           headers={"Content-Type": "application/json"})
-        if r.status_code == 200:
-            d = ujson.loads(r.text)
-            r.close()
-            return d.get("answer", "")
-        r.close()
-        return None
-    except Exception as e:
-        set_status(str(e)[:42], C_RED)
-        return None
-
-# ============================================================
-# VOICE QA SCREEN HELPERS
-# ============================================================
-
-def _show_answer_screen(answer):
-    """
-    Display the QA answer using up to 8 display slots for full text.
-
-    Slots and approx char capacity (word-wrapped):
-      0-3  : lbl_r0_k .. lbl_r3_k  (FONT_MONT_14, y=68..116, ~30 chars each)
-      4    : lbl_alert              (FONT_MONT_10, y=132,      ~42 chars)
-      5    : lbl_out_hdr            (FONT_MONT_14, y=152,      ~30 chars)
-      6    : lbl_out_temp           (FONT_MONT_14, y=166,      ~30 chars)
-      7    : lbl_out_hum            (FONT_MONT_10, y=180,      ~42 chars)
-    Total capacity ~260 chars -- enough for any QA response.
-    """
-    lbl_section.set_text("~ answer ~")
-    lbl_section.set_text_color(C_GREEN)
-    lbl_sep.set_text("")
-    lbl_out_desc.set_text("")
-    # Clear all value labels so key labels span full width
-    for lbl in [lbl_r0_v, lbl_r1_v, lbl_r2_v, lbl_r3_v]:
-        lbl.set_text("")
-
-    SLOTS  = [lbl_r0_k, lbl_r1_k, lbl_r2_k, lbl_r3_k,
-              lbl_alert, lbl_out_hdr, lbl_out_temp, lbl_out_hum]
-    WIDTHS = [30, 30, 30, 30, 42, 30, 30, 42]
-    COLORS = [C_GREEN,  C_GREEN,  C_GREEN,  C_GREEN,
-              C_WHITE,  C_WHITE,  C_WHITE,  C_WHITE]
-    N = len(SLOTS)
-
-    words    = answer.split()
-    lines    = [""] * N
-    li       = 0
-    overflow = False
-
-    for w in words:
-        if li >= N:
-            overflow = True
-            break
-        if lines[li] and len(lines[li]) + 1 + len(w) > WIDTHS[li]:
-            li += 1
-            if li >= N:
-                overflow = True
-                break
-        lines[li] = (lines[li] + " " + w).strip() if lines[li] else w
-
-    # If text overflowed, mark last line with ellipsis
-    if overflow and lines[N - 1]:
-        max_w = WIDTHS[N - 1] - 3
-        if len(lines[N - 1]) > max_w:
-            lines[N - 1] = lines[N - 1][:max_w]
-        lines[N - 1] = lines[N - 1].rstrip() + "..."
-
-    for lbl, color, text in zip(SLOTS, COLORS, lines):
-        lbl.set_text(text)
-        lbl.set_text_color(color)
-
-    set_status("", C_GRAY)
-
-
-def _beep(n=1):
-    """Short audio feedback: n beeps via speaker.tone() -- silently ignored if unavailable."""
-    try:
-        for _ in range(n):
-            speaker.tone(880, 150)
-            utime.sleep_ms(250)
-    except Exception:
-        pass
+        set_status("ingest: " + str(e)[:34], T("bad")); return False
 
 
 # ============================================================
 # AUDIO HELPERS
 # ============================================================
-def _make_wav_header(data_size, rate=18000):
-    """Return a 44-byte WAV header for 16-bit mono PCM at `rate` Hz.
-    Without this header Whisper receives raw bytes with no format info
-    and returns an empty transcript.
-    """
-    byte_rate = rate * 2  # 1 channel × 2 bytes/sample
-    return (
-        b'RIFF' +
-        struct.pack('<I', 36 + data_size) +
-        b'WAVEfmt ' +
-        struct.pack('<IHHIIHH', 16, 1, 1, rate, byte_rate, 2, 16) +
-        b'data' +
-        struct.pack('<I', data_size)
-    )
+def _wav_hdr(n, rate=18000):
+    br = rate * 2
+    return (b'RIFF' + struct.pack('<I', 36 + n) + b'WAVEfmt ' +
+            struct.pack('<IHHIIHH', 16, 1, 1, rate, br, 2, 16) +
+            b'data'  + struct.pack('<I', n))
+
+def _beep(n=1):
+    try:
+        for _ in range(n):
+            speaker.tone(880, 150)
+            utime.sleep_ms(250)
+    except:
+        pass
 
 
 # ============================================================
-# VOICE QA — on-device pipeline (button A to start, button A to stop)
-# Record → STT → QA → TTS → speaker.playRaw()
+# VOICE QA PIPELINE
 # ============================================================
-def _voice_qa_local():
-    """
-    Full on-device voice pipeline — variable-duration recording.
-      1. Record via I2S PDM mic at MIC_RATE Hz until button A pressed again
-         (or MIC_MAX_SECS reached)
-      2. POST /v1/stt  (Whisper) → transcript
-      3. POST /v1/qa   (GPT)     → answer  → displayed immediately
-      4. POST /v1/tts  (OpenAI, device=True) → 8 kHz PCM → speaker.playRaw()
-      5. Switch to MODE_ANSWER; button C returns home
-    gc.collect() is called after each large buffer to avoid OOM.
-    """
+def _voice_qa():
     global mode
+    max_bytes = MIC_RATE * 2 * MIC_MAX_SECS
 
-    max_bytes = MIC_RATE * 2 * MIC_MAX_SECS  # 540 KB — safe with Core2 8 MB PSRAM
-
-    # ---- 1. Record (variable duration) ----------------------------
-    lbl_section.set_text("~ listening ~")
-    lbl_section.set_text_color(C_CYAN)
-    for lbl in [lbl_r0_k, lbl_r0_v, lbl_r1_k, lbl_r1_v,
-                lbl_r2_k, lbl_r2_v, lbl_r3_k, lbl_r3_v, lbl_alert]:
-        lbl.set_text("")
-    lbl_r0_k.set_text("press A to stop")
-    lbl_r1_k.set_text("speak now!")
-    lbl_sep.set_text("")
-    lbl_out_hdr.set_text("")
-    lbl_out_temp.set_text("")
-    lbl_out_desc.set_text("")
-    lbl_out_hum.set_text("")
-    set_btn_labels("stop", "wifi", "")
-    set_status("mic open...", C_CYAN)
+    # ── 1. Recording screen ───────────────────────────────────
+    fill(0, 0, W, 28, T("card"))
+    txt(6, 6, "Listening...", T("accent"), T("card"))
+    hline(28)
+    draw_recording(0)
+    btn_bar("stop", "wifi", "")
+    set_status("mic open...", T("accent"))
     _beep(1)
 
     raw = None
     try:
-        mic = I2S(0,
-                  ws=Pin(0),
-                  sdin=Pin(34),
-                  mode=I2S.MASTER_PDM,
-                  dataformat=I2S.B16,
-                  channelformat=I2S.ONLY_RIGHT,
+        mic = I2S(0, ws=Pin(0), sdin=Pin(34), mode=I2S.MASTER_PDM,
+                  dataformat=I2S.B16, channelformat=I2S.ONLY_RIGHT,
                   samplerate=MIC_RATE)
-        buf = bytearray(max_bytes)
-        tmp = bytearray(MIC_CHUNK)
-        pos = 0
-        utime.sleep_ms(200)          # let mic stabilise
+        buf = bytearray(max_bytes); tmp = bytearray(MIC_CHUNK); pos = 0
+        utime.sleep_ms(200)
         while pos + MIC_CHUNK <= max_bytes:
             n = mic.readinto(tmp)
-            buf[pos:pos + n] = tmp[:n]
-            pos += n
-            elapsed = pos // (MIC_RATE * 2)
-            lbl_r2_k.set_text("{}s  (max {}s)".format(elapsed, MIC_MAX_SECS))
-            if btnA.wasPressed():    # second press → stop recording
-                break
-        mic.deinit()
-        del tmp
-        pcm = bytes(buf[:pos])
-        del buf
-        # Prepend WAV header — Whisper needs a valid audio container
-        raw = _make_wav_header(len(pcm), MIC_RATE) + pcm
-        del pcm
+            buf[pos:pos + n] = tmp[:n]; pos += n
+            draw_recording(pos // (MIC_RATE * 2))
+            if btnA.wasPressed(): break
+        mic.deinit(); del tmp
+        pcm = bytes(buf[:pos]); del buf
+        raw = _wav_hdr(len(pcm), MIC_RATE) + pcm; del pcm
     except Exception as e:
-        set_status("mic error: " + str(e)[:30], C_RED)
-        return
-    gc.collect()
-    _beep(2)
+        set_status("mic: " + str(e)[:34], T("bad")); return
+    gc.collect(); _beep(2)
 
-    # ---- 2. STT ---------------------------------------------------
-    lbl_r0_k.set_text("transcribing...")
-    lbl_r1_k.set_text("")
-    set_status("sending to Whisper...", C_YELLOW)
+    # ── 2. STT ───────────────────────────────────────────────
+    set_status("transcribing...", T("warn"))
     transcript = ""
     try:
-        b64   = ubinascii.b2a_base64(raw).decode().strip()
-        del raw;  gc.collect()
-        body  = ujson.dumps({"audio_base64": b64, "mime_type": "audio/wav", "language": "en"})
-        del b64;  gc.collect()
-        r     = urequests.post(API_BASE + "/v1/stt",
-                               data=body,
-                               headers={"Content-Type": "application/json"})
+        b64  = ubinascii.b2a_base64(raw).decode().strip(); del raw; gc.collect()
+        body = ujson.dumps({"audio_base64": b64, "mime_type": "audio/wav", "language": "en"})
+        del b64; gc.collect()
+        r = urequests.post(API_BASE + "/v1/stt", data=body,
+                           headers={"Content-Type": "application/json"})
         del body; gc.collect()
-        if r.status_code == 200:
-            transcript = ujson.loads(r.text).get("text", "")
-        r.close();  gc.collect()
-    except Exception as e:
-        set_status("STT error: " + str(e)[:28], C_RED)
-        return
-
-    if not transcript:
-        set_status("nothing heard — try again", C_ORANGE)
-        return
-
-    lbl_r0_k.set_text("heard:")
-    lbl_r1_k.set_text(transcript[:28])
-    set_status("thinking...", C_YELLOW)
-
-    # ---- 3. QA ----------------------------------------------------
-    answer = ""
-    try:
-        body  = ujson.dumps({"device_id": DEVICE_ID, "question": transcript})
-        del transcript; gc.collect()
-        r     = urequests.post(API_BASE + "/v1/qa",
-                               data=body,
-                               headers={"Content-Type": "application/json"})
-        del body; gc.collect()
-        if r.status_code == 200:
-            answer = ujson.loads(r.text).get("answer", "")
+        if r.status_code == 200: transcript = ujson.loads(r.text).get("text", "")
         r.close(); gc.collect()
     except Exception as e:
-        set_status("QA error: " + str(e)[:28], C_RED)
-        return
+        set_status("STT: " + str(e)[:34], T("bad")); return
 
-    # Display answer right away — don't wait for TTS
-    _show_answer_screen(answer if answer else "no answer received")
+    if not transcript:
+        set_status("nothing heard  — try again", T("warn")); return
+    set_status("heard: " + transcript[:30], T("fg"))
 
-    # ---- 4. TTS → speaker -----------------------------------------
-    set_status("loading audio...", C_YELLOW)
+    # ── 3. QA ────────────────────────────────────────────────
+    answer = ""
     try:
-        body     = ujson.dumps({"text": answer, "voice": "alloy",
-                                "audio_format": "pcm", "device": True})
+        body = ujson.dumps({"device_id": DEVICE_ID, "question": transcript})
+        del transcript; gc.collect()
+        r = urequests.post(API_BASE + "/v1/qa", data=body,
+                           headers={"Content-Type": "application/json"})
+        del body; gc.collect()
+        if r.status_code == 200: answer = ujson.loads(r.text).get("answer", "")
+        r.close(); gc.collect()
+    except Exception as e:
+        set_status("QA: " + str(e)[:34], T("bad")); return
+
+    draw_answer(answer if answer else "no answer received")
+
+    # ── 4. TTS → speaker ─────────────────────────────────────
+    set_status("loading audio...", T("warn"))
+    try:
+        body = ujson.dumps({"text": answer, "voice": "alloy",
+                            "audio_format": "pcm", "device": True})
         del answer; gc.collect()
-        r        = urequests.post(API_BASE + "/v1/tts",
-                                  data=body,
-                                  headers={"Content-Type": "application/json"})
+        r = urequests.post(API_BASE + "/v1/tts", data=body,
+                           headers={"Content-Type": "application/json"})
         del body; gc.collect()
         if r.status_code == 200:
-            audio_b64 = ujson.loads(r.text).get("audio_base64")
-            r.close()
-            if audio_b64:
-                audio_raw = ubinascii.a2b_base64(audio_b64)
-                del audio_b64; gc.collect()
-                set_status("speaking...", C_CYAN)
-                speaker.setVolume(10)
-                speaker.playRaw(audio_raw,
-                                sample_rate=8000,
+            ab = ujson.loads(r.text).get("audio_base64"); r.close()
+            if ab:
+                audio = ubinascii.a2b_base64(ab); del ab; gc.collect()
+                set_status("speaking...", T("accent"))
+                amp_max()
+                speaker.playRaw(audio, sample_rate=8000,
                                 data_format=speaker.F16B,
                                 channel=speaker.CHN_LR)
-                del audio_raw; gc.collect()
+                del audio; gc.collect()
         else:
             r.close()
-        set_status("done  :)", C_GREEN)
+        set_status("done  :)", T("good"))
     except Exception as e:
-        # TTS failure is non-fatal — answer is already on screen
-        set_status("TTS skip: " + str(e)[:28], C_ORANGE)
+        set_status("TTS: " + str(e)[:34], T("warn"))
 
-    # Switch to dedicated answer page; button C returns home
     mode = MODE_ANSWER
-    set_btn_labels("", "wifi", "home")
 
 
 # ============================================================
@@ -796,33 +711,27 @@ WIFI_PASSWORD = WIFI_NETWORKS[0][1]
 _wlan = network.WLAN(network.STA_IF)
 _wlan.active(True)
 
-def connect_wifi(ssid, password, retries=5):
+def connect_wifi(ssid, pw, retries=5):
     global WIFI_SSID, WIFI_PASSWORD
-    set_status("wifi: " + ssid[:20] + "...", C_YELLOW)
+    set_status("wifi: " + ssid[:20] + "...", T("warn"))
     if _wlan.isconnected():
         try:
             if _wlan.config("essid") == ssid:
-                WIFI_SSID, WIFI_PASSWORD = ssid, password
-                ip = _wlan.ifconfig()[0]
-                set_status("wifi: " + ip, C_GREEN)
-                return True
+                WIFI_SSID, WIFI_PASSWORD = ssid, pw
+                set_status(_wlan.ifconfig()[0], T("good")); return True
         except:
             pass
-        _wlan.disconnect()
-        time.sleep_ms(300)
-    _wlan.connect(ssid, password)
+        _wlan.disconnect(); time.sleep_ms(300)
+    _wlan.connect(ssid, pw)
     for i in range(retries * 10):
         if _wlan.isconnected():
-            WIFI_SSID, WIFI_PASSWORD = ssid, password
-            ip = _wlan.ifconfig()[0]
-            set_status("wifi: " + ip, C_GREEN)
-            print("[WIFI] connected ip=", ip)
+            WIFI_SSID, WIFI_PASSWORD = ssid, pw
+            set_status(_wlan.ifconfig()[0], T("good"))
+            print("[WIFI] connected ip=", _wlan.ifconfig()[0])
             return True
         time.sleep_ms(500)
-        if i % 10 == 9:
-            print("[WIFI] waiting attempt", (i // 10) + 1)
-    set_status("wifi failed: " + ssid[:16], C_RED)
-    return False
+    set_status("wifi failed: " + ssid[:14], T("bad")); return False
+
 
 # ============================================================
 # MAIN
@@ -831,6 +740,9 @@ def main():
     global mode, wifi_idx
 
     print("[BOOT] v" + FIRMWARE_VER)
+    cls()
+    set_status("connecting...", T("warn"))
+
     wifi_ok = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
 
     last_ingest_ts    = 0
@@ -840,174 +752,116 @@ def main():
     cached_weather    = {}
     cached_forecast   = {}
     last_reading      = read_sensors()
+    _need_redraw      = True
+    _last_hm          = ""
+    _last_sc          = ""
+    wifi_conn_status  = ""
 
     if wifi_ok:
         sync_ntp()
-
-        set_status("syncing data...", C_YELLOW)
+        set_status("syncing...", T("warn"))
         latest = api_latest()
         if latest:
             indoor = latest.get("indoor", {})
             if isinstance(indoor, str):
-                try:
-                    indoor = ujson.loads(indoor)
-                except:
-                    indoor = {}
-            last_reading.update({
-                "temperature_c": indoor.get("temperature_c"),
-                "humidity_pct":  indoor.get("humidity_pct"),
-                "tvoc_ppb":      indoor.get("tvoc_ppb"),
-                "eco2_ppm":      indoor.get("eco2_ppm"),
-            })
-            print("[SYNC] loaded from BigQuery")
-
-        show_indoor_mode(last_reading)
-
-        set_status("peeking outside...", C_YELLOW)
+                try: indoor = ujson.loads(indoor)
+                except: indoor = {}
+            last_reading.update({k: indoor.get(k) for k in
+                ("temperature_c","humidity_pct","tvoc_ppb","eco2_ppm")})
+        set_status("peeking outside...", T("warn"))
         w = api_weather_current()
-        if w:
-            cached_weather  = w
-            update_outdoor_display(w)
-            last_weather_ts = utime.time()
-            set_status("cozy and ready  :)", C_GREEN)
-        else:
-            set_status("no weather data", C_ORANGE)
-    else:
-        show_indoor_mode(last_reading)
-        set_status("offline mode  :(", C_ORANGE)
+        if w: cached_weather = w; last_weather_ts = utime.time()
 
-    # --------------------------------------------------------
-    # Main loop
-    # A = context-sensitive refresh   B = next WiFi + connect   C = cycle pages
-    # --------------------------------------------------------
-    wifi_conn_status = ""
+    draw_home(last_reading, cached_weather,
+              "ready :)" if wifi_ok else "offline :(")
+    _need_redraw = False
 
     while True:
         now = utime.time()
 
-        # Always update clock
-        lbl_time.set_text(get_time_str())
-        lbl_date.set_text(get_date_str())
-
-        # --- WiFi keepalive ---
+        # ── WiFi keepalive ────────────────────────────────────
         if wifi_ok and not _wlan.isconnected():
-            wifi_ok = False
-            set_status("signal lost, reconnecting...", C_ORANGE)
+            wifi_ok = False; set_status("signal lost...", T("warn"))
         if not wifi_ok and (now - last_reconnect_ts) >= 30:
             last_reconnect_ts = now
             wifi_ok = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
-            if wifi_ok:
-                sync_ntp()
-                last_ntp_ts = now
-                w = api_weather_current()
-                if w:
-                    cached_weather = w
-                    last_weather_ts = now
+            if wifi_ok: sync_ntp(); last_ntp_ts = now; _need_redraw = True
 
-        # --- NTP retry every 30 s until clock is valid ---
-        if wifi_ok and _local_time()[0] < 2024 and (now - last_ntp_ts) >= 30:
-            last_ntp_ts = now
-            sync_ntp()
-            if _local_time()[0] >= 2024:
-                set_status("clock is set!", C_GREEN)
+        # ── NTP retry ─────────────────────────────────────────
+        if wifi_ok and _local()[0] < 2024 and (now - last_ntp_ts) >= 30:
+            last_ntp_ts = now; sync_ntp()
 
-        # Read sensors every cycle
-        last_reading = read_sensors()
+        # ── Periodic ingest ───────────────────────────────────
+        if wifi_ok and (now - last_ingest_ts) >= INGEST_INTERVAL_SEC:
+            last_reading = read_sensors()
+            api_ingest(last_reading); last_ingest_ts = now
+            if mode == MODE_HOME: _need_redraw = True
 
-        # --- Render current page ---
-        if mode == MODE_NORMAL:
-            show_indoor_mode(last_reading)
-
-        elif mode == MODE_FORECAST:
-            show_forecast_mode(cached_forecast)
-
-        elif mode == MODE_WIFI:
-            show_wifi_mode(wifi_conn_status)
-
-        # MODE_ANSWER: static — _voice_qa_local() already drew everything
-
-        # --- Periodic ingest ---
-        if wifi_ok and (now - last_ingest_ts >= INGEST_INTERVAL_SEC):
-            ok = api_ingest(last_reading)
-            last_ingest_ts = now
-            if mode == MODE_NORMAL and ok is True:
-                set_status("all good  :)", C_GREEN)
-
-        # --- Periodic background weather refresh ---
-        if wifi_ok and (now - last_weather_ts >= WEATHER_INTERVAL_SEC):
+        # ── Periodic weather ──────────────────────────────────
+        if wifi_ok and (now - last_weather_ts) >= WEATHER_INTERVAL_SEC:
             w = api_weather_current()
-            if w:
-                cached_weather = w
-                if mode == MODE_NORMAL:
-                    update_outdoor_display(w)
-                last_weather_ts = now
+            if w: cached_weather = w; last_weather_ts = now
+            if mode == MODE_HOME: _need_redraw = True
 
-        # ---- Button A: micro (home) / refresh forecast / connect wifi ----
+        # ── Full page redraw ──────────────────────────────────
+        if _need_redraw:
+            if   mode == MODE_HOME:     draw_home(last_reading, cached_weather)
+            elif mode == MODE_FORECAST: draw_forecast(cached_forecast)
+            elif mode == MODE_WIFI:     draw_wifi(wifi_conn_status)
+            _need_redraw = False
+
+        # ── Partial clock update (home page only) ─────────────
+        if mode == MODE_HOME:
+            hm = time_hm(); sc = time_sec()
+            if hm != _last_hm or sc != _last_sc:
+                _update_clock_only()
+                _last_hm, _last_sc = hm, sc
+
+        # ── Buttons ───────────────────────────────────────────
         if btnA.wasPressed():
-            if mode == MODE_NORMAL:
-                if wifi_ok:
-                    _voice_qa_local()
-                else:
-                    set_status("no wifi  :(", C_RED)
+            if mode == MODE_HOME:
+                if wifi_ok: _voice_qa()
+                else: set_status("no wifi :(", T("bad"))
             elif mode == MODE_FORECAST:
                 if wifi_ok:
-                    set_status("peeking at forecast...", C_YELLOW)
-                    fc = api_weather_forecast(days=4)
-                    if fc:
-                        cached_forecast = fc
-                    show_forecast_mode(cached_forecast)
-                    set_status("forecast fresh!" if fc else "unavailable", C_GREEN if fc else C_ORANGE)
-                else:
-                    set_status("no wifi  :(", C_RED)
+                    set_status("refreshing...", T("warn"))
+                    fc = api_weather_forecast(4)
+                    if fc: cached_forecast = fc
+                    draw_forecast(cached_forecast, "ok")
             elif mode == MODE_WIFI:
                 ssid, pw = WIFI_NETWORKS[wifi_idx]
                 wifi_ok = connect_wifi(ssid, pw)
-                if wifi_ok:
-                    sync_ntp()
-                wifi_conn_status = "all good :)" if wifi_ok else "failed :("
-                show_wifi_mode(wifi_conn_status)
+                if wifi_ok: sync_ntp()
+                wifi_conn_status = "ok :)" if wifi_ok else "failed :("
+                draw_wifi(wifi_conn_status)
 
-        # ---- Button B: cycle to next WiFi network + connect ----
         if btnB.wasPressed():
             wifi_idx = (wifi_idx + 1) % len(WIFI_NETWORKS)
             ssid, pw = WIFI_NETWORKS[wifi_idx]
-            wifi_conn_status = "connecting..."
-            mode = MODE_WIFI
-            show_wifi_mode(wifi_conn_status)
+            mode = MODE_WIFI; wifi_conn_status = "connecting..."
+            draw_wifi(wifi_conn_status)
             wifi_ok = connect_wifi(ssid, pw)
-            if wifi_ok:
-                sync_ntp()
-            wifi_conn_status = "all good :)" if wifi_ok else "failed :("
-            show_wifi_mode(wifi_conn_status)
+            if wifi_ok: sync_ntp()
+            wifi_conn_status = "ok :)" if wifi_ok else "failed :("
+            draw_wifi(wifi_conn_status)
 
-        # ---- Button C: cycle pages  Home -> Forecast -> WiFi -> Home / Answer -> Home ----
         if btnC.wasPressed():
             if mode == MODE_ANSWER:
-                mode = MODE_NORMAL
-                show_indoor_mode(last_reading)
-                update_outdoor_display(cached_weather)
-                set_status("back home  :)", C_GREEN)
-            elif mode == MODE_NORMAL:
+                mode = MODE_HOME; _need_redraw = True
+                set_status("ready :)", T("good"))
+            elif mode == MODE_HOME:
                 mode = MODE_FORECAST
-                wifi_conn_status = ""
-                set_status("peeking at forecast...", C_YELLOW)
                 if wifi_ok:
-                    fc = api_weather_forecast(days=4)
-                    if fc:
-                        cached_forecast = fc
-                show_forecast_mode(cached_forecast)
-                set_status("forecast ready!" if cached_forecast else "no data", C_GREEN if cached_forecast else C_ORANGE)
+                    set_status("loading...", T("warn"))
+                    fc = api_weather_forecast(4)
+                    if fc: cached_forecast = fc
+                draw_forecast(cached_forecast)
             elif mode == MODE_FORECAST:
-                mode = MODE_WIFI
+                mode = MODE_WIFI; draw_wifi()
+            else:   # WIFI -> HOME
+                mode = MODE_HOME; _need_redraw = True
                 wifi_conn_status = ""
-                show_wifi_mode(wifi_conn_status)
-                set_status("wifi settings", C_ORANGE)
-            else:  # MODE_WIFI -> HOME
-                mode = MODE_NORMAL
-                wifi_conn_status = ""
-                show_indoor_mode(last_reading)
-                update_outdoor_display(cached_weather)
-                set_status("back home  :)", C_GREEN)
+                set_status("home :)", T("good"))
 
         time.sleep(0.2)
 
