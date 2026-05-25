@@ -10,6 +10,7 @@ from m5stack_ui import *
 from uiflow import *
 from machine import I2C, Pin, RTC, I2S
 import gc
+import struct
 import ubinascii
 import time
 import utime
@@ -363,7 +364,7 @@ def show_indoor_mode(r):
     # Show outdoor section
     lbl_sep.set_text('. ' * 20)
     lbl_out_hdr.set_text('~ outside ~')
-    set_btn_labels("micro", "wifi", "next >")
+    set_btn_labels("micro", "wifi", "forecast")
 
 # ============================================================
 # DISPLAY - FORECAST MODE
@@ -615,6 +616,25 @@ def _beep(n=1):
 
 
 # ============================================================
+# AUDIO HELPERS
+# ============================================================
+def _make_wav_header(data_size, rate=18000):
+    """Return a 44-byte WAV header for 16-bit mono PCM at `rate` Hz.
+    Without this header Whisper receives raw bytes with no format info
+    and returns an empty transcript.
+    """
+    byte_rate = rate * 2  # 1 channel × 2 bytes/sample
+    return (
+        b'RIFF' +
+        struct.pack('<I', 36 + data_size) +
+        b'WAVEfmt ' +
+        struct.pack('<IHHIIHH', 16, 1, 1, rate, byte_rate, 2, 16) +
+        b'data' +
+        struct.pack('<I', data_size)
+    )
+
+
+# ============================================================
 # VOICE QA — on-device pipeline (button A to start, button A to stop)
 # Record → STT → QA → TTS → speaker.playRaw()
 # ============================================================
@@ -673,8 +693,11 @@ def _voice_qa_local():
                 break
         mic.deinit()
         del tmp
-        raw = bytes(buf[:pos])
+        pcm = bytes(buf[:pos])
         del buf
+        # Prepend WAV header — Whisper needs a valid audio container
+        raw = _make_wav_header(len(pcm), MIC_RATE) + pcm
+        del pcm
     except Exception as e:
         set_status("mic error: " + str(e)[:30], C_RED)
         return
@@ -689,7 +712,7 @@ def _voice_qa_local():
     try:
         b64   = ubinascii.b2a_base64(raw).decode().strip()
         del raw;  gc.collect()
-        body  = ujson.dumps({"audio_base64": b64, "mime_type": "audio/pcm", "language": "en"})
+        body  = ujson.dumps({"audio_base64": b64, "mime_type": "audio/wav", "language": "en"})
         del b64;  gc.collect()
         r     = urequests.post(API_BASE + "/v1/stt",
                                data=body,
