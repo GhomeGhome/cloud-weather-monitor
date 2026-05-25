@@ -116,7 +116,7 @@ dashboard/
   Dockerfile
 
 device/micropython/
-  core2_main.py           # Firmware principal Core2 v1.2 (UIFlow1 MicroPython)
+  main.py                 # Firmware principal Core2 v1.3 (UIFlow1 MicroPython) — flasher tel quel
   config_example.py       # Template secrets → copier en config.py et remplir
   config.py               # ⛔ Gitignored — contient WiFi + INGEST_SECRET réels
   test_mic.py             # Diagnostic I2S microphone
