@@ -8,7 +8,9 @@
 from m5stack import *
 from m5stack_ui import *
 from uiflow import *
-from machine import I2C, Pin, RTC
+from machine import I2C, Pin, RTC, I2S
+import gc
+import ubinascii
 import time
 import utime
 import unit
@@ -26,22 +28,26 @@ except:
 # CONFIG - edit WIFI_NETWORKS before flashing
 # ============================================================
 DEVICE_ID    = "core2-main"
-FIRMWARE_VER = "1.3.0"
+FIRMWARE_VER = "1.4.0"
 API_BASE     = "https://weather-ingestion-api-972242315876.europe-west6.run.app"
 
-# Secrets loaded from config.py (not committed to git).
-# Copy device/micropython/config_example.py -> config.py and fill in values.
-try:
-    from config import INGEST_SECRET, WIFI_NETWORKS
-except ImportError:
-    INGEST_SECRET = "replace-me"
-    WIFI_NETWORKS = [("your-ssid", "your-password")]
+# VIDEO DEMO — credentials inlined for flashing via UIFlow (do not commit)
+# TODO: revert to config.py pattern after demo
+INGEST_SECRET = "iuvxiquoxbpq28e382fd92owexb9823gdp2icduweobx"
+WIFI_NETWORKS = [
+    ("iPhone de Guillaume (2)", "d2kcrrd4rx9x"),
+    ("iot-unil", "4u6uch4hpY9pJ2f9"),
+]
 
 UTC_OFFSET_H = 2  # Switzerland CEST; change to 1 for CET winter
 
 INGEST_INTERVAL_SEC   = 60
 WEATHER_INTERVAL_SEC  = 300
 PIR_ANNOUNCE_COOLDOWN = 30    # 30 s for testing -- set to 3600 for production
+
+# Voice QA (on-device recording)
+MIC_RATE    = 18000           # Hz — avoids 18 540 default pitch shift
+MIC_BUFSIZE = MIC_RATE * 2 * 3  # 3 s × 16-bit mono ≈ 108 KB
 
 # ============================================================
 # COLORS  -  autumn palette
@@ -370,7 +376,7 @@ def show_indoor_mode(r):
     # Show outdoor section
     lbl_sep.set_text('. ' * 20)
     lbl_out_hdr.set_text('~ outside ~')
-    set_btn_labels("refresh", "wifi", "forecast>")
+    set_btn_labels("speak", "wifi", "forecast>")
 
 # ============================================================
 # DISPLAY - FORECAST MODE
@@ -668,6 +674,133 @@ def _beep(n=1):
 
 
 # ============================================================
+# VOICE QA — on-device pipeline (no Dashboard needed)
+# Record → STT → QA → TTS → speaker.playRaw()
+# ============================================================
+def _voice_qa_local():
+    """
+    Full on-device voice pipeline:
+      1. Record MIC_BUFSIZE bytes via I2S PDM mic at MIC_RATE Hz
+      2. POST /v1/stt  (Whisper) → transcript
+      3. POST /v1/qa   (GPT)     → answer  → displayed immediately
+      4. POST /v1/tts  (OpenAI, device=True) → 8 kHz PCM → speaker.playRaw()
+    gc.collect() is called after each large buffer to avoid OOM.
+    """
+    # ---- 1. Record ------------------------------------------------
+    lbl_section.set_text("~ listening ~")
+    lbl_section.set_text_color(C_CYAN)
+    for lbl in [lbl_r0_k, lbl_r0_v, lbl_r1_k, lbl_r1_v,
+                lbl_r2_k, lbl_r2_v, lbl_r3_k, lbl_r3_v, lbl_alert]:
+        lbl.set_text("")
+    lbl_r0_k.set_text("recording 3s...")
+    lbl_r1_k.set_text("speak now!")
+    lbl_sep.set_text("")
+    lbl_out_hdr.set_text("")
+    lbl_out_temp.set_text("")
+    lbl_out_desc.set_text("")
+    lbl_out_hum.set_text("")
+    set_status("mic open...", C_CYAN)
+    _beep(1)
+
+    raw = None
+    try:
+        mic = I2S(0,
+                  ws=Pin(0),
+                  sdin=Pin(34),
+                  mode=I2S.MASTER_PDM,
+                  dataformat=I2S.B16,
+                  channelformat=I2S.ONLY_RIGHT,
+                  samplerate=MIC_RATE)
+        buf = bytearray(MIC_BUFSIZE)
+        utime.sleep_ms(200)          # let mic stabilise
+        n = mic.readinto(buf)
+        mic.deinit()
+        raw = bytes(buf[:n])
+        del buf
+    except Exception as e:
+        set_status("mic error: " + str(e)[:30], C_RED)
+        return
+    gc.collect()
+    _beep(2)
+
+    # ---- 2. STT ---------------------------------------------------
+    lbl_r0_k.set_text("transcribing...")
+    lbl_r1_k.set_text("")
+    set_status("sending to Whisper...", C_YELLOW)
+    transcript = ""
+    try:
+        b64   = ubinascii.b2a_base64(raw).decode().strip()
+        del raw;  gc.collect()
+        body  = ujson.dumps({"audio_base64": b64, "mime_type": "audio/pcm", "language": "en"})
+        del b64;  gc.collect()
+        r     = urequests.post(API_BASE + "/v1/stt",
+                               data=body,
+                               headers={"Content-Type": "application/json"})
+        del body; gc.collect()
+        if r.status_code == 200:
+            transcript = ujson.loads(r.text).get("text", "")
+        r.close();  gc.collect()
+    except Exception as e:
+        set_status("STT error: " + str(e)[:28], C_RED)
+        return
+
+    if not transcript:
+        set_status("nothing heard — try again", C_ORANGE)
+        return
+
+    lbl_r0_k.set_text("heard:")
+    lbl_r1_k.set_text(transcript[:28])
+    set_status("thinking...", C_YELLOW)
+
+    # ---- 3. QA ----------------------------------------------------
+    answer = ""
+    try:
+        body  = ujson.dumps({"device_id": DEVICE_ID, "question": transcript})
+        del transcript; gc.collect()
+        r     = urequests.post(API_BASE + "/v1/qa",
+                               data=body,
+                               headers={"Content-Type": "application/json"})
+        del body; gc.collect()
+        if r.status_code == 200:
+            answer = ujson.loads(r.text).get("answer", "")
+        r.close(); gc.collect()
+    except Exception as e:
+        set_status("QA error: " + str(e)[:28], C_RED)
+        return
+
+    # Display answer right away — don't wait for TTS
+    _show_answer_screen(answer if answer else "no answer received")
+
+    # ---- 4. TTS → speaker -----------------------------------------
+    set_status("speaking...", C_CYAN)
+    try:
+        body     = ujson.dumps({"text": answer, "voice": "alloy",
+                                "audio_format": "pcm", "device": True})
+        del answer; gc.collect()
+        r        = urequests.post(API_BASE + "/v1/tts",
+                                  data=body,
+                                  headers={"Content-Type": "application/json"})
+        del body; gc.collect()
+        if r.status_code == 200:
+            audio_b64 = ujson.loads(r.text).get("audio_base64")
+            r.close()
+            if audio_b64:
+                audio_raw = ubinascii.a2b_base64(audio_b64)
+                del audio_b64; gc.collect()
+                speaker.playRaw(audio_raw,
+                                sample_rate=8000,
+                                data_format=speaker.F16B,
+                                channel=speaker.CHN_L)
+                del audio_raw; gc.collect()
+        else:
+            r.close()
+        set_status("done  :)", C_GREEN)
+    except Exception as e:
+        # TTS failure is non-fatal — answer is already on screen
+        set_status("TTS skip: " + str(e)[:28], C_ORANGE)
+
+
+# ============================================================
 # WIFI
 # ============================================================
 WIFI_SSID     = WIFI_NETWORKS[0][0]
@@ -883,19 +1016,12 @@ def main():
                     update_outdoor_display(w)
                 last_weather_ts = now
 
-        # ---- Button A: context-sensitive refresh ----
+        # ---- Button A: speak (home) / refresh forecast / connect wifi ----
         if btnA.wasPressed():
             if mode == MODE_NORMAL:
                 if wifi_ok:
-                    set_status("peeking outside...", C_YELLOW)
-                    w = api_weather_current()
-                    if w:
-                        cached_weather = w
-                        update_outdoor_display(w)
-                        last_weather_ts = now
-                        set_status("refreshed!", C_GREEN)
-                    else:
-                        set_status("refresh failed :(", C_RED)
+                    _voice_qa_local()
+                    answer_display_ts = utime.time()
                 else:
                     set_status("no wifi  :(", C_RED)
             elif mode == MODE_FORECAST:

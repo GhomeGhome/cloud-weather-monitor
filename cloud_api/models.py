@@ -76,6 +76,7 @@ class TextToSpeechRequest(BaseModel):
     text: str
     voice: str = Field(default="alloy")
     audio_format: str = Field(default="mp3")
+    device: bool = Field(default=False, description="If True, return 8 kHz raw PCM for Core2 speaker.playRaw()")
 
 
 class TextToSpeechResponse(BaseModel):

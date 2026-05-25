@@ -185,6 +185,7 @@ def tts(payload: TextToSpeechRequest) -> TextToSpeechResponse:
             text=payload.text,
             voice=payload.voice,
             audio_format=payload.audio_format,
+            device=payload.device,
         )
         if provider == "none":
             return TextToSpeechResponse(status="success", provider=provider, text=payload.text)

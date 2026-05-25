@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import re
+import struct
 from typing import Dict, Any, Tuple
 
 import requests
@@ -402,7 +403,7 @@ class VoiceQaService:
     # ------------------------------------------------------------------
     # Text-to-speech (OpenAI TTS)
     # ------------------------------------------------------------------
-    def text_to_speech(self, text: str, voice: str, audio_format: str) -> Tuple[str, str]:
+    def text_to_speech(self, text: str, voice: str, audio_format: str, device: bool = False) -> Tuple[str, str]:
         if not settings.openai_api_key:
             return "none", ""
 
@@ -411,12 +412,43 @@ class VoiceQaService:
             "Authorization": f"Bearer {settings.openai_api_key}",
             "Content-Type": "application/json",
         }
+
+        # When device=True we request raw 24 kHz PCM from OpenAI then
+        # downsample to 8 kHz so Core2's speaker.playRaw() can handle it.
+        actual_format = "pcm" if device else (audio_format or "mp3")
+
         payload = {
             "model": settings.openai_tts_model,
             "voice": voice or "alloy",
             "input": text,
-            "format": audio_format or "mp3",
+            "response_format": actual_format,
         }
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
+
+        if device:
+            pcm_8k = _downsample_pcm(response.content)
+            return "openai", base64.b64encode(pcm_8k).decode("ascii")
+
         return "openai", base64.b64encode(response.content).decode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# Audio helpers
+# ---------------------------------------------------------------------------
+
+def _downsample_pcm(pcm: bytes, src_rate: int = 24000, dst_rate: int = 8000) -> bytes:
+    """Downsample 16-bit signed mono PCM by averaging groups of samples.
+
+    OpenAI TTS returns 24 kHz mono 16-bit PCM.
+    Core2 speaker.playRaw() works best at 8 kHz (3:1 decimation).
+    Averaging acts as a basic low-pass filter to reduce aliasing.
+    """
+    factor = src_rate // dst_rate          # 3 for 24 kHz → 8 kHz
+    n = len(pcm) // 2                      # number of 16-bit samples
+    samples = struct.unpack(f"<{n}h", pcm)
+    out: list[int] = []
+    for i in range(0, n - factor + 1, factor):
+        avg = sum(samples[i:i + factor]) // factor
+        out.append(max(-32768, min(32767, avg)))
+    return struct.pack(f"<{len(out)}h", *out)
