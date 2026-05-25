@@ -566,13 +566,6 @@ page         = st.sidebar.radio(
     ["📡 Realtime", "📈 History", "🔔 Events", "🎙️ Voice QA"],
     label_visibility="collapsed",
 )
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;'
-    'color:#64748B;font-weight:700;margin-bottom:6px">🎙️ Voice Assistant</div>',
-    unsafe_allow_html=True,
-)
-components.html(_mic_button_widget(device_id, compact=True), height=80)
 st.sidebar.markdown(
     f'<div style="font-size:.68rem;color:#334155;margin-top:8px;word-break:break-all">'
     f'API: {API_BASE[:45]}…</div>',
@@ -733,10 +726,8 @@ elif page == "🎙️ Voice QA":
         "Click the button, ask your question, get a spoken answer",
     )
 
-    qa_device = st.text_input("Device ID", value=device_id, key="qa_device_id")
-
     _section_label("🎙️ Microphone")
-    components.html(_mic_button_widget(qa_device, compact=False), height=200)
+    components.html(_mic_button_widget(device_id, compact=False), height=200)
 
     st.divider()
 
@@ -748,7 +739,7 @@ elif page == "🎙️ Voice QA":
         label_visibility="collapsed",
     )
     if st.button("Ask ›", key="ask_text") and typed_q.strip():
-        _run_qa_flow(typed_q.strip(), qa_device, push_to_device=True)
+        _run_qa_flow(typed_q.strip(), device_id, push_to_device=True)
 
     st.divider()
 
@@ -767,4 +758,4 @@ elif page == "🎙️ Voice QA":
                 f'Asking: <em style="color:#94A3B8">{q}</em></div>',
                 unsafe_allow_html=True,
             )
-            _run_qa_flow(q, qa_device, push_to_device=True)
+            _run_qa_flow(q, device_id, push_to_device=True)
