@@ -437,21 +437,16 @@ class VoiceQaService:
 # Audio helpers
 # ---------------------------------------------------------------------------
 
-def _downsample_pcm(pcm: bytes, src_rate: int = 24000, dst_rate: int = 8000,
-                    gain: float = 4.0) -> bytes:
-    """Downsample 16-bit signed mono PCM by averaging groups of samples,
-    then apply a gain to compensate for the amplitude loss from averaging.
+def _downsample_pcm(pcm: bytes, src_rate: int = 24000, dst_rate: int = 8000) -> bytes:
+    """Downsample 16-bit signed mono PCM by simple decimation (keep 1 sample
+    every `factor`, discard the rest).
 
-    OpenAI TTS returns 24 kHz mono 16-bit PCM.
-    Core2 speaker.playRaw() works best at 8 kHz (3:1 decimation).
-    Averaging reduces amplitude by ~factor; gain=4.0 restores loudness.
+    Averaging would divide amplitude by ~factor — making the Core2 speaker
+    nearly silent. Decimation preserves full amplitude at the cost of
+    aliasing, which is inaudible for TTS speech.
     """
     factor = src_rate // dst_rate          # 3 for 24 kHz → 8 kHz
-    n = len(pcm) // 2                      # number of 16-bit samples
+    n = len(pcm) // 2
     samples = struct.unpack(f"<{n}h", pcm)
-    out: list[int] = []
-    for i in range(0, n - factor + 1, factor):
-        avg = sum(samples[i:i + factor]) // factor
-        amplified = int(avg * gain)
-        out.append(max(-32768, min(32767, amplified)))
+    out = samples[::factor]
     return struct.pack(f"<{len(out)}h", *out)
