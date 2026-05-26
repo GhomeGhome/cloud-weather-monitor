@@ -24,11 +24,7 @@ FIRMWARE_VER = "2.0.0"
 API_BASE     = "https://weather-ingestion-api-972242315876.europe-west6.run.app"
 
 # VIDEO DEMO — credentials inlined (do not commit)
-INGEST_SECRET = "iuvxiquoxbpq28e382fd92owexb9823gdp2icduweobx"
-WIFI_NETWORKS = [
-    ("iPhone de Guillaume (2)", "d2kcrrd4rx9x"),
-    ("iot-unil", "4u6uch4hpY9pJ2f9"),
-]
+from config import INGEST_SECRET, WIFI_NETWORKS
 
 UTC_OFFSET_H         = 2
 INGEST_INTERVAL_SEC  = 60
@@ -230,10 +226,17 @@ print("[I2C] found:", [hex(a) for a in _found])
 PIR_PIN      = 36
 PIR_COOLDOWN = 3600   # minimum seconds between greetings (1 hour)
 
-_pir_pin  = None
+_pir_pin       = None
+_pir_triggered = False
+
+def _pir_isr(pin):
+    global _pir_triggered
+    _pir_triggered = True
+
 try:
     _pir_pin = Pin(PIR_PIN, Pin.IN)
-    print("[PIR] initialised on GPIO", PIR_PIN)
+    _pir_pin.irq(trigger=Pin.IRQ_RISING, handler=_pir_isr)
+    print("[PIR] initialised on GPIO", PIR_PIN, "with IRQ")
 except Exception as _e:
     print("[PIR] init error:", _e)
 
@@ -1031,7 +1034,7 @@ def main():
     last_sensor_ts    = 0
     last_reconnect_ts = 0
     last_ntp_ts       = 0
-    last_pir_ts       = 0        # timestamp of last greeting
+    last_pir_ts       = -PIR_COOLDOWN  # ensures first trigger always works after boot
     global _air_alert_ts; _air_alert_ts = 0
     cached_weather    = {}
     cached_forecast   = {}
@@ -1078,13 +1081,11 @@ def main():
         if wifi_ok and not _ntp_ok and (now - last_ntp_ts) >= 30:
             last_ntp_ts = now; sync_ntp()
 
-        # ── PIR motion → greeting (cooldown only, no edge detection) ────
-        if _pir_pin is not None and wifi_ok:
-            try:
-                pir_val = bool(_pir_pin.value())
-            except:
-                pir_val = False
-            if pir_val and (now - last_pir_ts) >= PIR_COOLDOWN:
+        # ── PIR motion → greeting (IRQ flag, cooldown guard) ────────
+        global _pir_triggered
+        if _pir_triggered and wifi_ok:
+            _pir_triggered = False
+            if (now - last_pir_ts) >= PIR_COOLDOWN:
                 last_pir_ts = now
                 _do_greeting()
 
