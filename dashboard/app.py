@@ -392,6 +392,64 @@ def _weather_advice_random(main: str) -> str:
     return "Have a great day! 🌈"
 
 
+def _forecast_widget(api_base: str) -> None:
+    """Fetch the 5-day forecast from the cloud API and render day cards."""
+    _now = time.time()
+    _FORECAST_TTL = 600  # 10 minutes — same as outdoor cache
+    if (
+        "forecast_cache" not in st.session_state
+        or _now - st.session_state.get("forecast_ts", 0) >= _FORECAST_TTL
+    ):
+        try:
+            r = requests.get(
+                f"{api_base}/v1/weather/forecast",
+                params={"days": 5},
+                timeout=10,
+            )
+            r.raise_for_status()
+            st.session_state.forecast_cache = r.json().get("forecast", {}).get("daily", [])
+            st.session_state.forecast_ts    = _now
+        except Exception:
+            st.session_state.forecast_cache = []
+            st.session_state.forecast_ts    = _now
+
+    daily = st.session_state.get("forecast_cache", [])
+    if not daily:
+        return
+
+    from datetime import datetime as _dt
+    _section_label("📅 5-Day Forecast")
+    cols = st.columns(len(daily))
+    for i, (col, day) in enumerate(zip(cols, daily)):
+        date_str = day.get("date", "")
+        try:
+            day_label = "Today" if i == 0 else _dt.strptime(date_str, "%Y-%m-%d").strftime("%A")
+        except Exception:
+            day_label = date_str[-5:] if date_str else "?"
+
+        main  = day.get("weather_main") or ""
+        desc  = (day.get("weather_description") or main).capitalize()
+        tmin  = day.get("temp_min_c")
+        tmax  = day.get("temp_max_c")
+        emoji = _weather_emoji(main, "2.2rem")
+        _, border = _banner_bg(main)
+        tmax_s = f"{tmax:.0f}°C" if tmax is not None else "--"
+        tmin_s = f"{tmin:.0f}°C" if tmin is not None else "--"
+
+        with col:
+            st.markdown(f"""
+<div style="background:rgba(30,41,59,0.55);border:1px solid {border};
+            border-radius:14px;padding:16px 10px;text-align:center;height:100%">
+  <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;
+              color:#64748B;font-weight:700;margin-bottom:8px">{day_label}</div>
+  <div style="margin-bottom:9px;line-height:1">{emoji}</div>
+  <div style="font-size:.74rem;color:#94A3B8;margin-bottom:10px;
+              min-height:2.6em;line-height:1.3">{desc}</div>
+  <div style="font-size:.95rem;font-weight:800;color:#F1F5F9">{tmax_s}</div>
+  <div style="font-size:.78rem;color:#64748B;margin-top:1px">{tmin_s}</div>
+</div>""", unsafe_allow_html=True)
+
+
 def _weather_banner(row, advice: str = "") -> None:
     try:
         main = str(row["weather_main"] or "Clear")
@@ -811,6 +869,10 @@ if page == "📡 Realtime":
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+    # 5-day forecast cards (full width, below indoor/outdoor columns)
+    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+    _forecast_widget(API_BASE)
 
 
 # ============================================================

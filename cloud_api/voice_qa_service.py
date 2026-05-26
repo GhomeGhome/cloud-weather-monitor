@@ -605,15 +605,14 @@ class VoiceQaService:
         response.raise_for_status()
 
         if device:
-            # 1. Decimate 24 kHz → 8 kHz (factor 3 — Core2 speaker max rate)
-            # 2. Normalize to 95 % full-scale; max_gain=200 handles OpenAI TTS
-            #    which outputs at ~1-5 % of full scale.
-            # Mono WAV: the device uses machine.I2S directly with ALL_LEFT
-            # channel format, which sends the mono sample to both I2S L and R
-            # slots so the AW88298 receives full amplitude on both inputs.
-            pcm_8k = _downsample_pcm(response.content, src_rate=24000, dst_rate=8000)
-            pcm_loud = _normalize_pcm(pcm_8k, headroom=0.95, max_gain=10)
-            wav = _pcm_to_wav(pcm_loud, rate=8000)
+            # Normalise loudness, then downsample 24 kHz → 12 kHz (factor 2)
+            # using a 2nd-order Butterworth IIR filter (bilinear transform).
+            # 12 kHz keeps a 6 kHz bandwidth (excellent for voice) and the
+            # base64 payload is ~244 KB — half of native 24 kHz — so it fits
+            # comfortably in the Core2's fragmented MicroPython heap.
+            pcm_loud = _normalize_pcm(response.content, headroom=0.95, max_gain=10)
+            pcm_12k  = _downsample_pcm_hq(pcm_loud, src_rate=24000, dst_rate=12000)
+            wav      = _pcm_to_wav(pcm_12k, rate=12000)
             return "openai", base64.b64encode(wav).decode("ascii")
 
         return "openai", base64.b64encode(response.content).decode("ascii")
@@ -623,21 +622,47 @@ class VoiceQaService:
 # Audio helpers
 # ---------------------------------------------------------------------------
 
-def _downsample_pcm(pcm: bytes, src_rate: int = 24000, dst_rate: int = 8000) -> bytes:
-    """Downsample 16-bit signed mono PCM with box-filter averaging.
+def _downsample_pcm_hq(pcm: bytes, src_rate: int = 24000, dst_rate: int = 8000) -> bytes:
+    """Downsample 16-bit signed mono PCM with a 2nd-order Butterworth IIR
+    low-pass filter (bilinear transform) followed by integer decimation.
 
-    Simple decimation (take every Nth sample) causes high-frequency aliasing
-    that sounds like crackling/static at 8 kHz playback.  Averaging each
-    group of N samples acts as a crude low-pass (anti-aliasing) filter and
-    eliminates those artefacts.
+    The old box-filter (3-sample average) had only −9.5 dB attenuation at the
+    output Nyquist, letting high-frequency energy alias back into the audible
+    band and causing crackling artefacts.  A Butterworth filter rolls off at
+    −40 dB/decade above the cutoff and cleanly removes those components before
+    decimation.  No external dependencies — pure Python + stdlib math.
     """
-    factor = src_rate // dst_rate          # 3 for 24 kHz → 8 kHz
+    factor = src_rate // dst_rate  # 3 for 24 kHz → 8 kHz
+
+    # Design: 2nd-order Butterworth LP, cutoff = Nyquist of output rate
+    fc   = dst_rate / 2.0                     # 4 000 Hz for 8 kHz output
+    wc   = math.tan(math.pi * fc / src_rate)  # pre-warped angular frequency
+    wc2  = wc * wc
+    sq2  = math.sqrt(2.0)
+    inv  = 1.0 / (1.0 + sq2 * wc + wc2)
+    b0   =  wc2 * inv
+    b1   =  2.0 * b0
+    b2   =  b0
+    a1   =  2.0 * (wc2 - 1.0) * inv
+    a2   =  (1.0 - sq2 * wc + wc2) * inv
+
     n = len(pcm) // 2
     samples = struct.unpack(f"<{n}h", pcm)
-    decimated = tuple(
-        sum(samples[i:i + factor]) // factor
-        for i in range(0, n - factor + 1, factor)
-    )
+
+    # Forward IIR pass (direct form II transposed)
+    x1 = x2 = y1 = y2 = 0.0
+    filtered: list[float] = []
+    for s in samples:
+        y = b0 * s + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        filtered.append(y)
+        x2, x1 = x1, float(s)
+        y2, y1 = y1, y
+
+    # Decimate: keep every `factor`-th sample
+    decimated = [
+        max(-32768, min(32767, int(filtered[i])))
+        for i in range(0, n, factor)
+    ]
     return struct.pack(f"<{len(decimated)}h", *decimated)
 
 
