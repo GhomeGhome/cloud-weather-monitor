@@ -42,10 +42,14 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 .stApp { background: #0F172A !important; }
 
-/* ── Kill the white header bar ── */
-header[data-testid="stHeader"],
-[data-testid="stHeader"] { display: none !important; }
-.block-container { padding-top: 1.5rem !important; }
+/* ── Header : dark theme instead of hiding (keeps native sidebar toggle) ── */
+header[data-testid="stHeader"] {
+    background: #0D1424 !important;
+    border-bottom: 1px solid rgba(148,163,184,0.07) !important;
+}
+header[data-testid="stHeader"] button svg { fill: #94A3B8 !important; }
+[data-testid="stDecoration"] { display: none !important; }
+.block-container { padding-top: 1rem !important; }
 
 /* Sidebar */
 [data-testid="stSidebar"] {
@@ -705,22 +709,13 @@ st.sidebar.markdown(
 
 # ============================================================
 # GLOBAL ALERT BANNER (visible on every page)
-# Checks indoor metrics every 30 s and shows a sticky banner + alarm sound.
+# Always queries latest indoor data — autorefresh controls frequency.
 # ============================================================
 st_autorefresh(interval=30_000, key="global_alert_refresh")
 
-_now_a = time.time()
-_ALERT_TTL = 30  # seconds between BigQuery checks
-if (
-    "alert_indoor_ts" not in st.session_state
-    or _now_a - st.session_state.alert_indoor_ts >= _ALERT_TTL
-):
-    st.session_state.alert_indoor    = latest_indoor(device_id)
-    st.session_state.alert_indoor_ts = _now_a
-
-_adf  = st.session_state.get("alert_indoor", None)
+_adf  = latest_indoor(device_id)
 _alert_msgs: list[str] = []
-if _adf is not None and not _adf.empty:
+if not _adf.empty:
     _ar   = _adf.iloc[0]
     _ah   = _ar.get("humidity_pct")
     _atvoc = int(_ar.get("tvoc_ppb") or 0)
@@ -778,13 +773,9 @@ else:
 # PAGE: REALTIME
 # ============================================================
 if page == "📡 Realtime":
-    # Indoor refreshes every 3 s; outdoor is cached for 10 minutes.
-    st_autorefresh(interval=3_000, key="realtime_refresh")
-
-    indoor = latest_indoor(device_id)
-
+    # Outdoor cached 10 min (full page rerun only)
     _now = time.time()
-    _OUTDOOR_TTL = 600  # 10 minutes
+    _OUTDOOR_TTL = 600
     if (
         "outdoor_cache" not in st.session_state
         or "outdoor_ts" not in st.session_state
@@ -797,68 +788,66 @@ if page == "📡 Realtime":
             if not st.session_state.outdoor_cache.empty else ""
         )
         st.session_state.outdoor_advice = _weather_advice_random(_m0)
-    outdoor = st.session_state.outdoor_cache
 
-    # Animated weather banner (full width) — advice shown inside the banner
+    outdoor = st.session_state.outdoor_cache
     if not outdoor.empty:
         _weather_banner(outdoor.iloc[0], advice=st.session_state.get("outdoor_advice", ""))
 
-    col_in, col_out = st.columns(2, gap="large")
+    # ── Live metrics fragment: indoor re-fetched every 3 s ───
+    @st.fragment(run_every=3)
+    def _live_metrics():
+        indoor  = latest_indoor(device_id)
+        _outdoor = st.session_state.get("outdoor_cache", None)
 
-    # ── Indoor ──────────────────────────────────────────────
-    with col_in:
-        if indoor.empty:
-            st.warning("No indoor data yet.")
-        else:
-            row = indoor.iloc[0]
-            _section_label(f"🏠 Indoor · {_fmt_ts(row['event_ts'])}")
+        col_in, col_out = st.columns(2, gap="large")
 
-            c1, c2 = st.columns(2)
-            t    = row["temperature_c"]
-            h    = row["humidity_pct"]
-            tvoc = int(row["tvoc_ppb"]) if row["tvoc_ppb"] is not None else None
-            eco2 = int(row["eco2_ppm"]) if row["eco2_ppm"] is not None else None
+        # Indoor
+        with col_in:
+            if indoor is None or indoor.empty:
+                st.warning("No indoor data yet.")
+            else:
+                row = indoor.iloc[0]
+                _section_label(f"🏠 Indoor · {_fmt_ts(row['event_ts'])}")
+                c1, c2 = st.columns(2)
+                t    = row["temperature_c"]
+                h    = row["humidity_pct"]
+                tvoc = int(row["tvoc_ppb"]) if row["tvoc_ppb"] is not None else None
+                eco2 = int(row["eco2_ppm"]) if row["eco2_ppm"] is not None else None
+                c1.metric("🌡️ Temperature", f"{t:.1f} °C" if t is not None else "n/a")
+                c2.metric("💧 Humidity",    f"{h:.0f} %"  if h is not None else "n/a")
+                c3, c4 = st.columns(2)
+                c3.metric("🌿 TVOC",  f"{tvoc} ppb" if tvoc is not None else "n/a")
+                c4.metric("💨 eCO₂",  f"{eco2} ppm" if eco2 is not None else "n/a")
+                badges = []
+                if h is not None and h < 40:
+                    badges.append(('rgba(248,113,113,.13)', '#FCA5A5', 'rgba(248,113,113,.3)', '⚠️ Low humidity — use a humidifier'))
+                if tvoc is not None and tvoc > 500:
+                    badges.append(('rgba(248,113,113,.13)', '#FCA5A5', 'rgba(248,113,113,.3)', '⚠️ Poor air quality (TVOC)'))
+                if eco2 is not None and eco2 > 1000:
+                    badges.append(('rgba(250,204,21,.13)',  '#FDE68A', 'rgba(250,204,21,.3)',  '⚠️ High CO₂ — ventilate'))
+                if badges:
+                    html = "".join(
+                        f'<span style="display:inline-block;margin:3px;padding:5px 13px;'
+                        f'border-radius:999px;font-size:.8rem;font-weight:600;'
+                        f'background:{bg};color:{fg};border:1px solid {bd}">{txt}</span>'
+                        for bg, fg, bd, txt in badges
+                    )
+                    st.markdown(f'<div style="margin-top:12px">{html}</div>', unsafe_allow_html=True)
 
-            c1.metric("🌡️ Temperature", f"{t:.1f} °C" if t is not None else "n/a")
-            c2.metric("💧 Humidity",    f"{h:.0f} %"  if h is not None else "n/a")
-            c3, c4 = st.columns(2)
-            c3.metric("🌿 TVOC",  f"{tvoc} ppb" if tvoc is not None else "n/a")
-            c4.metric("💨 eCO₂",  f"{eco2} ppm" if eco2 is not None else "n/a")
-
-            # Alert badges
-            badges = []
-            if h is not None and h < 40:
-                badges.append(('rgba(248,113,113,.13)', '#FCA5A5', 'rgba(248,113,113,.3)', '⚠️ Low humidity — use a humidifier'))
-            if tvoc is not None and tvoc > 500:
-                badges.append(('rgba(248,113,113,.13)', '#FCA5A5', 'rgba(248,113,113,.3)', '⚠️ Poor air quality (TVOC)'))
-            if eco2 is not None and eco2 > 1000:
-                badges.append(('rgba(250,204,21,.13)',  '#FDE68A', 'rgba(250,204,21,.3)',  '⚠️ High CO₂ — ventilate'))
-            if badges:
-                html = "".join(
-                    f'<span style="display:inline-block;margin:3px;padding:5px 13px;'
-                    f'border-radius:999px;font-size:.8rem;font-weight:600;'
-                    f'background:{bg};color:{fg};border:1px solid {bd}">{txt}</span>'
-                    for bg, fg, bd, txt in badges
-                )
-                st.markdown(f'<div style="margin-top:12px">{html}</div>', unsafe_allow_html=True)
-
-    # ── Outdoor ─────────────────────────────────────────────
-    with col_out:
-        if outdoor.empty:
-            st.warning("No outdoor data yet.")
-        else:
-            row = outdoor.iloc[0]
-            _section_label(f"🌍 Outdoor · {_fmt_ts(row['weather_ts'])}")
-
-            c1, c2 = st.columns(2)
-            c1.metric("🌡️ Temperature", f"{row['temperature_c']:.1f} °C")
-            c2.metric("💧 Humidity",    f"{row['humidity_pct']:.0f} %")
-
-            main = str(row["weather_main"] or "")
-            desc = str(row["weather_description"] or main).capitalize()
-            big_w = _weather_emoji(main, "3.8rem")
-
-            st.markdown(f"""
+        # Outdoor (from cache)
+        with col_out:
+            if _outdoor is None or _outdoor.empty:
+                st.warning("No outdoor data yet.")
+            else:
+                row = _outdoor.iloc[0]
+                _section_label(f"🌍 Outdoor · {_fmt_ts(row['weather_ts'])}")
+                c1, c2 = st.columns(2)
+                c1.metric("🌡️ Temperature", f"{row['temperature_c']:.1f} °C")
+                c2.metric("💧 Humidity",    f"{row['humidity_pct']:.0f} %")
+                main  = str(row["weather_main"] or "")
+                desc  = str(row["weather_description"] or main).capitalize()
+                big_w = _weather_emoji(main, "3.8rem")
+                st.markdown(f"""
 <div style="display:flex;align-items:center;gap:16px;margin-top:14px;
             background:rgba(30,41,59,0.5);border:1px solid rgba(148,163,184,0.1);
             border-radius:14px;padding:16px 20px">
@@ -869,6 +858,8 @@ if page == "📡 Realtime":
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+    _live_metrics()
 
     # 5-day forecast cards (full width, below indoor/outdoor columns)
     st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
