@@ -631,7 +631,7 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-device_id    = st.sidebar.text_input("Device ID", value="core2-main")
+device_id    = st.sidebar.selectbox("Device", ["core2-main", "core2-alex"])
 history_days = st.sidebar.slider("History (days)", min_value=1, max_value=30, value=7)
 page         = st.sidebar.radio(
     "Navigation",
