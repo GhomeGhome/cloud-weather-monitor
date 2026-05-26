@@ -25,6 +25,4 @@ device/micropython/config.py
 # Private / local notes (do not publish)
 deroulement.txt
 
-# Course labs (local only, not published)
-theorical_labs/
 

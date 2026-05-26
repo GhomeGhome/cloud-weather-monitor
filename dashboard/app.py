@@ -1,5 +1,7 @@
 import base64
 import os
+import random
+import time
 from datetime import timezone, timedelta
 
 import requests
@@ -326,7 +328,71 @@ def _snow_flakes_html() -> str:
     )
 
 
-def _weather_banner(row) -> None:
+_WEATHER_ADVICE: dict[str, list[str]] = {
+    "thunderstorm": [
+        "Stay inside and stay safe! ⚡",
+        "Thunder and lightning — best to stay indoors today.",
+        "Severe weather — avoid going outside if you can.",
+    ],
+    "drizzle": [
+        "A light jacket and small umbrella should do!",
+        "Just a sprinkle — but better safe than sorry.",
+        "Light drizzle — don't forget a rain jacket.",
+    ],
+    "rain": [
+        "Don't forget your umbrella! ☂️",
+        "Stay dry today — grab a raincoat.",
+        "Perfect day to stay cozy inside with a hot drink.",
+        "It's going to be wet out there — dress accordingly.",
+    ],
+    "snow": [
+        "Bundle up warm! ❄️",
+        "Roads may be icy — drive carefully.",
+        "Dress in layers and watch your step outside.",
+        "Snow day! Don't forget gloves and a warm hat.",
+    ],
+    "mist": [
+        "Reduced visibility — give extra space on the road.",
+        "Misty morning — take it slow out there.",
+    ],
+    "fog": [
+        "Dense fog — allow extra travel time.",
+        "Foggy conditions — headlights on and drive carefully.",
+    ],
+    "haze": [
+        "Hazy skies — stay hydrated and protect your eyes.",
+        "Air quality may be affected — sensitive groups take care.",
+    ],
+    "smoke": [
+        "Smoky air — consider staying indoors.",
+        "Poor air quality — an N95 mask may help outdoors.",
+    ],
+    "clear": [
+        "Great day for a walk! ☀️",
+        "Perfect conditions for outdoor activities!",
+        "Don't forget sunscreen — UV index may be high.",
+        "Beautiful weather — enjoy the sunshine!",
+        "Ideal day to spend time outdoors.",
+    ],
+    "cloud": [
+        "Light layers recommended today.",
+        "Overcast but comfortable — good for a stroll.",
+        "Cloudy skies — no umbrella needed just yet.",
+        "A mild day, perfect for outdoor activities.",
+    ],
+}
+
+
+def _weather_advice_random(main: str) -> str:
+    """Return a random piece of advice matching the weather condition."""
+    m = main.lower()
+    for key, advices in _WEATHER_ADVICE.items():
+        if key in m:
+            return random.choice(advices)
+    return "Have a great day! 🌈"
+
+
+def _weather_banner(row, advice: str = "") -> None:
     try:
         main = str(row["weather_main"] or "Clear")
         desc = str(row["weather_description"] or main).capitalize()
@@ -346,8 +412,12 @@ def _weather_banner(row) -> None:
     elif "snow" in ml:
         particles = _snow_flakes_html()
 
-    temp_str = f"{temp:.1f}°C" if temp is not None else "--°C"
-    hum_str  = f"{hum:.0f} %"  if hum is not None else "-- %"
+    temp_str   = f"{temp:.1f}°C" if temp is not None else "--°C"
+    hum_str    = f"{hum:.0f} %"  if hum is not None else "-- %"
+    advice_html = (
+        f'<div style="font-size:.82rem;color:#7DD3FC;margin-top:6px;font-style:italic">'
+        f'{advice}</div>'
+    ) if advice else ""
 
     st.markdown(f"""
 <div style="position:relative;overflow:hidden;border-radius:20px;
@@ -365,6 +435,7 @@ def _weather_banner(row) -> None:
     <div style="font-size:.85rem;color:#94A3B8;margin-top:3px">
       Humidity {hum_str}
     </div>
+    {advice_html}
   </div>
   <div style="position:relative;z-index:1;margin:0 10px">{creature}</div>
   <div style="position:relative;z-index:1;
@@ -575,17 +646,104 @@ st.sidebar.markdown(
 
 
 # ============================================================
+# GLOBAL ALERT BANNER (visible on every page)
+# Checks indoor metrics every 30 s and shows a sticky banner + alarm sound.
+# ============================================================
+st_autorefresh(interval=30_000, key="global_alert_refresh")
+
+_now_a = time.time()
+_ALERT_TTL = 30  # seconds between BigQuery checks
+if (
+    "alert_indoor_ts" not in st.session_state
+    or _now_a - st.session_state.alert_indoor_ts >= _ALERT_TTL
+):
+    st.session_state.alert_indoor    = latest_indoor(device_id)
+    st.session_state.alert_indoor_ts = _now_a
+
+_adf  = st.session_state.get("alert_indoor", None)
+_alert_msgs: list[str] = []
+if _adf is not None and not _adf.empty:
+    _ar   = _adf.iloc[0]
+    _ah   = _ar.get("humidity_pct")
+    _atvoc = int(_ar.get("tvoc_ppb") or 0)
+    _aeco2 = int(_ar.get("eco2_ppm") or 0)
+    if _ah is not None and float(_ah) < 40:
+        _alert_msgs.append("💧 Low humidity — use a humidifier")
+    if _atvoc > 500:
+        _alert_msgs.append("🌿 Poor air quality (TVOC)")
+    if _aeco2 > 1000:
+        _alert_msgs.append("💨 High CO₂ — ventilate the room")
+
+_prev_alert = st.session_state.get("prev_global_alert", False)
+_has_alert  = len(_alert_msgs) > 0
+
+if _has_alert:
+    _msgs_html = " &nbsp;·&nbsp; ".join(_alert_msgs)
+    st.markdown(f"""
+<div style="background:linear-gradient(90deg,rgba(220,38,38,.82),rgba(153,27,27,.82));
+            border:1px solid rgba(248,113,113,.35);border-radius:14px;
+            padding:13px 22px;margin-bottom:18px;
+            display:flex;align-items:center;gap:14px;backdrop-filter:blur(8px)">
+  <span style="font-size:1.5rem;animation:bell-ring 3.5s ease-in-out infinite;
+               display:inline-block;transform-origin:top center">🔔</span>
+  <div>
+    <div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.12em;
+                color:rgba(252,165,165,.75);font-weight:700">Indoor Alert</div>
+    <div style="font-size:.92rem;font-weight:700;color:#FCA5A5">{_msgs_html}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+    # Play alarm sound only on transition (no-alert → alert)
+    if not _prev_alert:
+        components.html("""<script>
+(function() {
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    function beep(t) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type = 'square'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.22, ctx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.4);
+      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.45);
+    }
+    beep(0); beep(0.6); beep(1.2);
+  } catch(e) { console.warn('Alert sound blocked by browser policy:', e); }
+})();
+</script>""", height=0)
+    st.session_state.prev_global_alert = True
+else:
+    st.session_state.prev_global_alert = False
+
+
+# ============================================================
 # PAGE: REALTIME
 # ============================================================
 if page == "📡 Realtime":
-    st_autorefresh(interval=10_000, key="realtime_refresh")
+    # Indoor refreshes every 3 s; outdoor is cached for 10 minutes.
+    st_autorefresh(interval=3_000, key="realtime_refresh")
 
-    indoor  = latest_indoor(device_id)
-    outdoor = latest_outdoor()
+    indoor = latest_indoor(device_id)
 
-    # Animated weather banner (full width)
+    _now = time.time()
+    _OUTDOOR_TTL = 600  # 10 minutes
+    if (
+        "outdoor_cache" not in st.session_state
+        or "outdoor_ts" not in st.session_state
+        or _now - st.session_state.outdoor_ts >= _OUTDOOR_TTL
+    ):
+        st.session_state.outdoor_cache = latest_outdoor()
+        st.session_state.outdoor_ts    = _now
+        _m0 = (
+            str(st.session_state.outdoor_cache.iloc[0]["weather_main"])
+            if not st.session_state.outdoor_cache.empty else ""
+        )
+        st.session_state.outdoor_advice = _weather_advice_random(_m0)
+    outdoor = st.session_state.outdoor_cache
+
+    # Animated weather banner (full width) — advice shown inside the banner
     if not outdoor.empty:
-        _weather_banner(outdoor.iloc[0])
+        _weather_banner(outdoor.iloc[0], advice=st.session_state.get("outdoor_advice", ""))
 
     col_in, col_out = st.columns(2, gap="large")
 

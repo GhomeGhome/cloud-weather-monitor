@@ -1,14 +1,92 @@
 import base64
 import io
 import json
+import math
+import random
 import re
 import struct
+import wave
 from typing import Dict, Any, Tuple
 
 import requests
 
 from bigquery_repo import BigQueryRepository
 from config import settings
+
+
+# ---------------------------------------------------------------------------
+# Fun contextual advice catalogue
+# Each key maps to a list of playful tips - one is picked at random.
+# ---------------------------------------------------------------------------
+_ADVICE = {
+    # ── Outdoor weather ───────────────────────────────────────────────────
+    "rain": [
+        "Don't forget your umbrella - unless you enjoy surprise showers!",
+        "Rain alert! Unless you're a duck, grab that umbrella.",
+        "It's raining out there. Perfect weather for staying cozy inside!",
+    ],
+    "storm": [
+        "Thunderstorm incoming - best to stay indoors and enjoy the show from the window!",
+        "Lightning outside! Unplug your gadgets and make yourself a warm drink.",
+        "Storm alert - maybe skip the outdoor run today.",
+    ],
+    "snow": [
+        "Snow day! Boots, layers, and watch for icy patches.",
+        "It's snowing - perfect excuse for hot chocolate and a blanket!",
+        "Winter wonderland outside, but be careful on slippery roads!",
+    ],
+    "hot": [
+        "It's scorching out there - don't forget your sunscreen!",
+        "Hot day ahead. Stay hydrated and keep to the shade when you can.",
+        "Watch out for sunburns today, it's a real scorcher!",
+        "Drink plenty of water - your body will thank you!",
+    ],
+    "cold": [
+        "Bundle up - it's freezing out there!",
+        "Brrr! Don't forget your coat, scarf, and gloves.",
+        "It's chilly - perfect excuse for hot chocolate on the way!",
+    ],
+    "wind": [
+        "Quite windy today - hold onto your hat!",
+        "Strong gusts today - maybe skip the umbrella, it'll flip inside-out!",
+        "Windy out there - great hair day for some, bad hair day for others.",
+    ],
+    "clear": [
+        "Gorgeous weather - get some vitamin D while it lasts!",
+        "Beautiful sunny day - perfect for a walk outside!",
+        "Sun's out - don't forget your sunglasses!",
+    ],
+    # ── Indoor air quality ────────────────────────────────────────────────
+    "co2_high": [
+        "Your indoor air is getting stuffy - open a window!",
+        "CO2 is climbing in here. Time to air the place out!",
+        "Crack open a window - the air inside could use some freshening up.",
+        "High CO2 indoors - your brain will work better with some fresh air!",
+    ],
+    "tvoc_high": [
+        "TVOC levels are elevated - ventilate the room!",
+        "Something's off-gassing in here. Open a window and give it a few minutes.",
+        "Air quality is not great - crack a window, it only takes a minute!",
+    ],
+    # ── Indoor humidity ───────────────────────────────────────────────────
+    "humidity_low": [
+        "The air is getting dry - your skin and sinuses will thank you for a humidifier!",
+        "Pretty dry in here. Great time to water your plants - and yourself!",
+        "Dry air alert - lip balm and a glass of water are your best friends right now.",
+        "Low humidity indoors. Staying hydrated is extra important today!",
+    ],
+    "humidity_high": [
+        "It's getting muggy in here - might want to crack a window!",
+        "High humidity indoors - perfect conditions for feeling like a wet sponge. Ventilate!",
+        "Humidity is high - a bit of airflow will make the whole place feel fresher.",
+    ],
+}
+
+
+def _pick(key: str) -> str:
+    """Return a random tip from the catalogue for the given condition key."""
+    tips = _ADVICE.get(key, [])
+    return random.choice(tips) if tips else ""
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +166,7 @@ def _time_label(days_ago: int) -> str:
 
 
 def _air_quality_label(tvoc: float | None, eco2: float | None) -> str:
-    """Human-readable air quality assessment."""
+    """Human-readable air quality assessment with random contextual tips."""
     if tvoc is None and eco2 is None:
         return "unknown"
     issues = []
@@ -98,16 +176,16 @@ def _air_quality_label(tvoc: float | None, eco2: float | None) -> str:
         elif tvoc < 660:
             issues.append(f"TVOC is moderate at {tvoc:.0f} ppb")
         else:
-            issues.append(f"TVOC is high at {tvoc:.0f} ppb — consider ventilating")
+            issues.append(f"TVOC is high at {tvoc:.0f} ppb - {_pick('tvoc_high')}")
     if eco2 is not None:
         if eco2 < 800:
             issues.append("CO2 is excellent")
         elif eco2 < 1000:
             issues.append(f"CO2 is acceptable at {eco2:.0f} ppm")
         elif eco2 < 2000:
-            issues.append(f"CO2 is elevated at {eco2:.0f} ppm — open a window")
+            issues.append(f"CO2 is elevated at {eco2:.0f} ppm - {_pick('co2_high')}")
         else:
-            issues.append(f"CO2 is very high at {eco2:.0f} ppm — ventilate immediately")
+            issues.append(f"CO2 is very high at {eco2:.0f} ppm - {_pick('co2_high')}")
     return "; ".join(issues)
 
 
@@ -209,8 +287,8 @@ class VoiceQaService:
                 snap = self._latest_indoor(device_id)
                 h = snap.get("humidity_pct")
                 if h is not None:
-                    note = " That's quite dry — consider a humidifier." if h < 40 else ""
-                    return "humidity", f"The current indoor humidity is {h:.0f} percent.{note}"
+                    tip = (" " + _pick("humidity_low")) if h < 40 else ""
+                    return "humidity", f"The current indoor humidity is {h:.0f} percent.{tip}"
             return "humidity", f"I don't have humidity data for {label}."
 
         avg = summary["avg_humidity_pct"]
@@ -220,9 +298,9 @@ class VoiceQaService:
             resp += f", peaking at {hi:.0f} percent"
         resp += "."
         if avg < 40:
-            resp += " Humidity was low — you might want to use a humidifier."
+            resp += " " + _pick("humidity_low")
         elif avg > 70:
-            resp += " Humidity was high — good ventilation is recommended."
+            resp += " " + _pick("humidity_high")
         return "humidity", resp
 
     def _answer_air(self, device_id: str, days_ago: int, label: str) -> Tuple[str, str]:
@@ -302,14 +380,28 @@ class VoiceQaService:
         else:
             resp = f"{when}, the forecast is {desc}."
 
-        # Contextual advice
+        # Contextual advice - pick a random tip from the catalogue
         desc_l = desc.lower()
-        if any(w in desc_l for w in ["rain", "drizzle", "shower", "storm", "thunder"]):
-            resp += " Don't forget your umbrella!"
+        tip = ""
+        if any(w in desc_l for w in ["thunder", "storm"]):
+            tip = _pick("storm")
+        elif any(w in desc_l for w in ["rain", "drizzle", "shower"]):
+            tip = _pick("rain")
         elif any(w in desc_l for w in ["snow", "sleet", "blizzard", "freezing"]):
-            resp += " Dress warmly and watch for icy conditions!"
+            tip = _pick("snow")
         elif any(w in desc_l for w in ["clear", "sunny"]):
-            resp += " Looks like a great day to be outside!"
+            if tmax is not None and tmax >= 28:
+                tip = _pick("hot")
+            else:
+                tip = _pick("clear")
+        elif any(w in desc_l for w in ["wind", "gust", "breezy"]):
+            tip = _pick("wind")
+        if tmax is not None and tmax >= 30 and not tip:
+            tip = _pick("hot")
+        elif tmax is not None and tmax <= 2 and not tip:
+            tip = _pick("cold")
+        if tip:
+            resp += f" {tip}"
 
         return "forecast", resp
 
@@ -334,17 +426,17 @@ class VoiceQaService:
             if avg_h is not None:
                 parts.append(f"humidity was {avg_h:.0f} percent")
                 if avg_h < 40:
-                    alerts.append("humidity was low — consider a humidifier")
+                    alerts.append(_pick("humidity_low"))
                 elif avg_h > 70:
-                    alerts.append("humidity was high — ventilate the room")
+                    alerts.append(_pick("humidity_high"))
 
         if aq:
             avg_tvoc = aq.get("avg_tvoc_ppb")
             avg_eco2 = aq.get("avg_eco2_ppm")
             if avg_tvoc is not None and avg_tvoc > 220:
-                alerts.append(f"TVOC was elevated at {avg_tvoc:.0f} ppb")
+                alerts.append(f"TVOC was elevated at {avg_tvoc:.0f} ppb - {_pick('tvoc_high')}")
             if avg_eco2 is not None and avg_eco2 > 1000:
-                alerts.append(f"CO2 was high at {avg_eco2:.0f} ppm")
+                alerts.append(f"CO2 was high at {avg_eco2:.0f} ppm - {_pick('co2_high')}")
 
         if not parts:
             return "no_data", f"I don't have enough data for {label} yet."
@@ -353,6 +445,92 @@ class VoiceQaService:
         if alerts:
             resp += " Note: " + "; ".join(alerts) + "."
         return "summary", resp
+
+    # ------------------------------------------------------------------
+    # PIR greeting
+    # ------------------------------------------------------------------
+    def generate_greeting(self, device_id: str, utc_hour: int | None = None) -> str:
+        """Build a friendly spoken greeting for PIR-triggered announcements.
+
+        Format: "Good <time>! Today, <weather>. <indoor note if notable>. <tip>."
+        """
+        from datetime import datetime, timezone
+        if utc_hour is None:
+            utc_hour = datetime.now(timezone.utc).hour
+
+        # Time-of-day salutation
+        if 5 <= utc_hour < 12:
+            salutation = "Good morning"
+        elif 12 <= utc_hour < 18:
+            salutation = "Good afternoon"
+        elif 18 <= utc_hour < 22:
+            salutation = "Good evening"
+        else:
+            salutation = "Hello"
+
+        parts = [f"{salutation}!"]
+        tip = ""
+
+        # ── Outdoor weather ──────────────────────────────────────────────
+        outdoor = self.repo.get_latest_outdoor()
+        if outdoor:
+            temp  = outdoor.get("temperature_c")
+            desc  = outdoor.get("weather_description") or outdoor.get("weather_main") or ""
+            desc_l = desc.lower()
+
+            weather_str = "Today"
+            if temp is not None:
+                weather_str += f", it's {temp:.0f} degrees outside"
+            if desc:
+                weather_str += f" with {desc.lower()}"
+            parts.append(weather_str + ".")
+
+            # Pick tip based on outdoor conditions
+            if any(w in desc_l for w in ["thunder", "storm"]):
+                tip = _pick("storm")
+            elif any(w in desc_l for w in ["rain", "drizzle", "shower"]):
+                tip = _pick("rain")
+            elif any(w in desc_l for w in ["snow", "sleet", "blizzard", "freezing"]):
+                tip = _pick("snow")
+            elif any(w in desc_l for w in ["wind", "gust", "breezy"]):
+                tip = _pick("wind")
+            elif temp is not None and temp >= 28:
+                tip = _pick("hot")
+            elif temp is not None and temp <= 2:
+                tip = _pick("cold")
+            elif any(w in desc_l for w in ["clear", "sunny"]):
+                tip = _pick("clear")
+
+        # ── Indoor conditions (override tip only if outdoor gave nothing) ──
+        try:
+            snap     = self._latest_indoor(device_id)
+            humidity = snap.get("humidity_pct")
+            eco2     = snap.get("eco2_ppm")
+            tvoc     = snap.get("tvoc_ppb")
+
+            if humidity is not None and humidity < 40:
+                if not tip:
+                    tip = _pick("humidity_low")
+                parts.append(f"Indoor humidity is low at {humidity:.0f} percent.")
+            elif humidity is not None and humidity > 70:
+                if not tip:
+                    tip = _pick("humidity_high")
+                parts.append(f"Indoor humidity is high at {humidity:.0f} percent.")
+
+            if eco2 is not None and eco2 > 1500:
+                if not tip:
+                    tip = _pick("co2_high")
+                parts.append(f"CO2 indoors is elevated at {eco2:.0f} ppm.")
+            elif tvoc is not None and tvoc > 500:
+                if not tip:
+                    tip = _pick("tvoc_high")
+        except Exception:
+            pass
+
+        if tip:
+            parts.append(tip)
+
+        return " ".join(parts)
 
     # ------------------------------------------------------------------
     # Helper: latest indoor reading from snapshot
@@ -389,7 +567,7 @@ class VoiceQaService:
         else:
             ext = ".wav"
 
-        # Pass raw bytes directly — io.BytesIO.name is not settable in Python 3.11
+        # Pass raw bytes directly - io.BytesIO.name is not settable in Python 3.11
         filename = f"audio{ext}"
         url = f"{settings.openai_base_url.rstrip('/')}/audio/transcriptions"
         headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
@@ -427,9 +605,16 @@ class VoiceQaService:
         response.raise_for_status()
 
         if device:
-            # Decimate 24 kHz → 8 kHz (keep every 3rd sample, no averaging)
-            # Decimation preserves full amplitude; averaging would divide it by 3.
-            return "openai", base64.b64encode(_downsample_pcm(response.content)).decode("ascii")
+            # 1. Decimate 24 kHz → 8 kHz (factor 3 — Core2 speaker max rate)
+            # 2. Normalize to 95 % full-scale; max_gain=200 handles OpenAI TTS
+            #    which outputs at ~1-5 % of full scale.
+            # Mono WAV: the device uses machine.I2S directly with ALL_LEFT
+            # channel format, which sends the mono sample to both I2S L and R
+            # slots so the AW88298 receives full amplitude on both inputs.
+            pcm_8k = _downsample_pcm(response.content, src_rate=24000, dst_rate=8000)
+            pcm_loud = _normalize_pcm(pcm_8k, headroom=0.95, max_gain=10)
+            wav = _pcm_to_wav(pcm_loud, rate=8000)
+            return "openai", base64.b64encode(wav).decode("ascii")
 
         return "openai", base64.b64encode(response.content).decode("ascii")
 
@@ -439,15 +624,76 @@ class VoiceQaService:
 # ---------------------------------------------------------------------------
 
 def _downsample_pcm(pcm: bytes, src_rate: int = 24000, dst_rate: int = 8000) -> bytes:
-    """Downsample 16-bit signed mono PCM by simple decimation (keep 1 sample
-    every `factor`, discard the rest).
+    """Downsample 16-bit signed mono PCM with box-filter averaging.
 
-    Averaging would divide amplitude by ~factor — making the Core2 speaker
-    nearly silent. Decimation preserves full amplitude at the cost of
-    aliasing, which is inaudible for TTS speech.
+    Simple decimation (take every Nth sample) causes high-frequency aliasing
+    that sounds like crackling/static at 8 kHz playback.  Averaging each
+    group of N samples acts as a crude low-pass (anti-aliasing) filter and
+    eliminates those artefacts.
     """
     factor = src_rate // dst_rate          # 3 for 24 kHz → 8 kHz
     n = len(pcm) // 2
     samples = struct.unpack(f"<{n}h", pcm)
-    out = samples[::factor]
-    return struct.pack(f"<{len(out)}h", *out)
+    decimated = tuple(
+        sum(samples[i:i + factor]) // factor
+        for i in range(0, n - factor + 1, factor)
+    )
+    return struct.pack(f"<{len(decimated)}h", *decimated)
+
+
+def _normalize_pcm(pcm: bytes, headroom: float = 0.90, max_gain: float = 30.0) -> bytes:
+    """Normalize PCM so the loudest sample reaches headroom * MAX.
+
+    OpenAI TTS outputs at ~5-15 % of full scale. This measures the actual
+    peak and scales the whole signal up so it hits 90 % of max — guaranteed
+    loud without distortion, regardless of input level.
+    max_gain caps amplification so near-silent passages are not blown up.
+    """
+    n = len(pcm) // 2
+    if n == 0:
+        return pcm
+    MAX = 32767.0
+    samples = struct.unpack(f"<{n}h", pcm)
+    peak = max(abs(s) for s in samples)
+    if peak == 0:
+        return pcm
+    scale = min(headroom * MAX / peak, max_gain)
+    normalized = tuple(max(-32768, min(32767, int(s * scale))) for s in samples)
+    return struct.pack(f"<{n}h", *normalized)
+
+
+def _mono_to_stereo_pcm(pcm: bytes) -> bytes:
+    """Duplicate each mono 16-bit sample to both L and R channels.
+
+    The Core2 AW88298 amplifier mixes L+R into its mono speaker output.
+    With CHN_L playback the R channel is silence, so the sum is signal/2 (-6 dB).
+    Sending the same sample on both channels gives L+R = full amplitude.
+    The resulting buffer is twice as long; playRaw with CHN_LR at the same
+    sample_rate produces the correct duration and pitch.
+    """
+    n = len(pcm) // 2
+    samples = struct.unpack(f"<{n}h", pcm)
+    stereo = [val for s in samples for val in (s, s)]
+    return struct.pack(f"<{n * 2}h", *stereo)
+
+
+def _soft_limit_pcm(pcm: bytes, gain: float = 8.0) -> bytes:
+    """Apply gain then tanh soft-limiting - kept for reference."""
+    n = len(pcm) // 2
+    if n == 0:
+        return pcm
+    MAX = 32767.0
+    samples = struct.unpack(f"<{n}h", pcm)
+    limited = tuple(int(math.tanh(s * gain / MAX) * MAX) for s in samples)
+    return struct.pack(f"<{n}h", *limited)
+
+
+def _pcm_to_wav(pcm: bytes, channels: int = 1, rate: int = 8000) -> bytes:
+    """Wrap raw 16-bit signed mono PCM in a RIFF WAV container."""
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)   # 16-bit
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return out.getvalue()

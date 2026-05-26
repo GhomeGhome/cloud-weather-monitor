@@ -150,6 +150,18 @@ def weather_forecast(days: int = 5) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/v1/weather/greeting")
+def weather_greeting(device_id: str = "core2-main", utc_hour: int | None = None) -> dict:
+    """Return a spoken greeting for PIR-triggered announcements."""
+    repo = get_repo()
+    service = VoiceQaService(repo)
+    try:
+        text = service.generate_greeting(device_id=device_id, utc_hour=utc_hour)
+        return {"status": "success", "text": text}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/v1/qa", response_model=QaResponse)
 def qa(payload: QaRequest) -> QaResponse:
     repo = get_repo()
