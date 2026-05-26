@@ -4,6 +4,8 @@ An indoor/outdoor weather station with a **voice AI assistant**, built on **M5St
 
 **Demo video:** https://youtu.be/giZnkiv71Mo
 
+**GitHub repo:** https://github.com/GhomeGhome/cloud-weather-monitor
+
 **Live dashboard:** https://weather-dashboard-972242315876.europe-west6.run.app
 
 ---
