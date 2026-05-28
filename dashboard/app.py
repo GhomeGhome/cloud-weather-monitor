@@ -773,6 +773,7 @@ else:
 # PAGE: REALTIME
 # ============================================================
 if page == "📡 Realtime":
+    st_autorefresh(interval=5_000, key="realtime_refresh")
     # Outdoor cached 10 min (full page rerun only)
     _now = time.time()
     _OUTDOOR_TTL = 600
